@@ -43,10 +43,10 @@ class USBDescriptors():
             d.bDeviceClass       = 0xEF
             d.bDeviceSubclass    = 0x02
             d.bDeviceProtocol    = 0x01
-            d.idVendor           = 0x1209
-            d.idProduct          = 0xADA1 if "USB1" in product_id else 0xADA2
-            d.iManufacturer      = "OpenAudioGear"
-            d.iProduct           = product_id
+            d.idVendor           = 0x1209          # pid.codes hobbyist VID
+            d.idProduct          = 0xEAB1          # EventsLight AVB Bridge 1
+            d.iManufacturer      = "EventsLight"
+            d.iProduct           = "N-Series AVB Switchover"
             d.iSerialNumber      = "0"
             d.bcdDevice          = 0.01
 
