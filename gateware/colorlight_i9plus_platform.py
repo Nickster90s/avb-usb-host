@@ -78,6 +78,7 @@ _ULPI_DIMM = {
 
 class ColorlightI9PlusPlatform(XilinxPlatform):
     """Colorlight i9plus v6.1 (XC7A50T-FGG484) with external ULPI PHY."""
+    name        = "colorlight_i9plus"           # used by LUNA logging
     device      = "xc7a50t"
     package     = "fgg484"
     speed       = "1"
@@ -86,6 +87,28 @@ class ColorlightI9PlusPlatform(XilinxPlatform):
     # Required by LUNA's top_level_cli — gives the generated SoC its
     # own sync/usb/fast clock domains.
     clock_domain_generator = ColorlightI9PlusCAR
+
+    def __init__(self):
+        # "Xray" = yosys + nextpnr-xilinx + prjxray-db (the openXC7 stack
+        # we already use for avb-aes3). Amaranth's default is Vivado.
+        super().__init__(toolchain="Xray")
+
+    @property
+    def _xray_device(self):
+        # Amaranth's default returns just "xc7a50t" (family). Our
+        # prjxray chipdb is per-package: "xc7a50tfgg484.bin".
+        return f"{self.device}{self.package}"
+
+    @property
+    def vendor_toolchain(self):
+        # Amaranth's XilinxPlatform claims vendor_toolchain only for
+        # Vivado/ISE; Xray gets the generic Platform.get_input_output
+        # path which rejects IOSTANDARD attrs. We DO want IOSTANDARD on
+        # all pins (it ends up in the generated XDC, which nextpnr-
+        # xilinx reads), so override to claim vendor support for IO
+        # construction. The vendor-specific tooling commands are still
+        # selected by `self.toolchain == "Xray"` elsewhere.
+        return True
 
     resources = [
         Resource("clk25", 0, Pins("K4", dir="i"),

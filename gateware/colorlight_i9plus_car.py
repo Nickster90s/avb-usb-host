@@ -58,7 +58,10 @@ class ColorlightI9PlusCAR(Elaboratable):
 
         m.submodules.mainpll = Instance("PLLE2_ADV",
             p_BANDWIDTH       = "OPTIMIZED",
-            p_COMPENSATION    = "ZHOLD",
+            # "INTERNAL" is what nextpnr-xilinx's fasm backend supports;
+            # "ZHOLD" (Vivado default) crashes the open toolchain at
+            # post-routing legalisation (fasm.cc:1572).
+            p_COMPENSATION    = "INTERNAL",
             p_STARTUP_WAIT    = "FALSE",
             p_DIVCLK_DIVIDE   = 1,
             p_CLKFBOUT_MULT   = 24,
