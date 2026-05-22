@@ -1,0 +1,11 @@
+# Python venv with installed deps — recreate via requirements.txt
+.venv/
+__pycache__/
+*.pyc
+
+# Amaranth/Yosys/nextpnr build outputs
+build/
+
+# Editor files
+.vscode/
+*.swp

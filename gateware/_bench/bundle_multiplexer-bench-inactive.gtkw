@@ -1,0 +1,88 @@
+[*]
+[*] GTKWave Analyzer v3.4.0 (w)1999-2022 BSI
+[*] Tue Dec 14 22:59:41 2021
+[*]
+[dumpfile] "test_BundleMultiplexerTest_test_inactive_bundle.vcd"
+[dumpfile_mtime] "Tue Dec 14 22:35:59 2021"
+[dumpfile_size] 17202
+[savefile] "gateware/bundle_multiplexer-bench.gtkw"
+[timestart] 0
+[size] 3828 2090
+[pos] -1921 27
+*-15.418433 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1
+[treeopen] top.
+[sst_width] 562
+[signals_width] 606
+[sst_expanded] 1
+[sst_vpaned_height] 658
+@28
+bench.top.clk
+@200
+-Inputs
+@22
+bench.top.no_channels0[3:0]
+bench.top.no_channels1[3:0]
+bench.top.no_channels2[3:0]
+bench.top.no_channels3[3:0]
+bench.top.input_bundle0__channel_nr[2:0]
+bench.top.input_bundle0__last
+bench.top.input_bundle0__payload[23:0]
+bench.top.input_bundle0__valid
+bench.top.input_bundle1__channel_nr[2:0]
+bench.top.input_bundle1__last
+bench.top.input_bundle1__payload[23:0]
+bench.top.input_bundle1__valid
+bench.top.input_bundle2__channel_nr[2:0]
+bench.top.input_bundle2__last
+bench.top.input_bundle2__payload[23:0]
+bench.top.input_bundle2__valid
+bench.top.input_bundle3__channel_nr[2:0]
+bench.top.input_bundle3__last
+bench.top.input_bundle3__payload[23:0]
+bench.top.input_bundle3__valid
+@200
+-Module
+@22
+bench.top.current_bundle[1:0]
+bench.top.current_channel[4:0]
+@29
+bench.top.bundle0_active
+bench.top.bundle1_active
+bench.top.bundle2_active
+bench.top.bundle3_active
+@22
+bench.top.first_bundle_channel[4:0]
+bench.top.bundle0_channel[2:0]
+bench.top.bundle0_last
+bench.top.bundle0_read_en
+bench.top.bundle0_ready
+bench.top.bundle0_sample[23:0]
+bench.top.bundle1_channel[2:0]
+bench.top.bundle1_last
+bench.top.bundle1_read_en
+bench.top.bundle1_ready
+bench.top.bundle1_sample[23:0]
+bench.top.bundle2_channel[2:0]
+bench.top.bundle2_last
+bench.top.bundle2_read_en
+bench.top.bundle2_ready
+bench.top.bundle2_sample[23:0]
+bench.top.bundle3_channel[2:0]
+bench.top.bundle3_last
+bench.top.bundle3_read_en
+bench.top.bundle3_ready
+bench.top.bundle3_sample[23:0]
+@200
+-Output
+@28
+bench.top.channel_stream__first
+bench.top.channel_stream__last
+@23
+bench.top.channel_stream__channel_nr[4:0]
+@22
+bench.top.channel_stream__payload[23:0]
+@28
+bench.top.channel_stream__ready
+bench.top.channel_stream__valid
+[pattern_trace] 1
+[pattern_trace] 0
