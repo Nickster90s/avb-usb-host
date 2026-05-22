@@ -12,62 +12,110 @@ DAW ── UAC2 OUT ──► [USB device]
                     [CRF listener] ◄── Ethernet ──── (CRF from mixer)
 ```
 
+## Hardware
+
+- **FPGA board**: Colorlight i9plus v6.1 (XC7A50T-FGG484)
+- **USB HS PHY**: external USB3300 ULPI breakout, wired to the **P2** header
+- **Ethernet**: two on-board RGMII PHYs (B50612D) for AVB
+- **I2S DAC** (optional local monitor): PCM5102A on the **P6** header — same pins as in `avb-aes3`
+
+## Pin assignments
+
+### USB3300 ULPI → P2 header
+
+| ULPI signal | i9plus pin | Notes |
+|---|---|---|
+| 3V3, GND | P2 power rails | Power the breakout from these |
+| **CLK** (60 MHz IN from PHY) | **T3** | Bank 35 clock-capable candidate — verify at build |
+| DIR | T4 | |
+| NXT | U2 | |
+| STP | U3 | |
+| RST (active-LOW) | R2 | |
+| DATA0 | V2 | |
+| DATA1 | V3 | |
+| DATA2 | W1 | |
+| DATA3 | W2 | |
+| DATA4 | Y1 | |
+| DATA5 | AA1 | |
+| DATA6 | AB1 | |
+| DATA7 | Y2 | |
+
+If T3 turns out not to be MRCC/SRCC on this package, swap with T4 or U3 (also Bank 35 corner — likely clock-capable).
+
+### I2S DAC (PCM5102A) → P6 header
+
+| I2S signal | i9plus pin |
+|---|---|
+| BCK (bit clock) | **U7** |
+| LRCK (word clock) | **U6** |
+| DIN (serial data) | **U5** |
+
+These three pins are on the **P6** header (dimm pins 46, 48, 50 — Bot row). The DAC stays as a local monitor output. Audio playback comes from gateware FIFOs paced by MCR (Phase 3 work).
+
+### Ethernet — on-board PHYs (no jumper wires)
+
+PHY0 (U5): RGMII on H4/A1/H2/G2/G1/F1/E3/E2/E1/F3/D1/B2/B1/C2/D2
+PHY1 (U9): RGMII on L3/M6/H2/G2/G1/R1/N2/N3/P1/P2/N5/M5/M2/N4/P4
+(H2/G2/G1 are MDIO/MDC shared.)
+
+### What's free for future expansion
+
+After USB (13 pins on P2) and I2S DAC (3 pins on P6), the rest of the user-IO is **untouched**:
+
+- **P2 remaining**: Y3, Y4, Y6, W4, AA3, AB2, AB3 (7 pins)
+- **P3 header**: ~20 pins, Bank 14/15 (V18/V19/V8/V9/W17/W19/Y18/Y19/AA19/AA20/AA21/AB18/AB20/P14/W9/Y9/AA6/R14/AB8 plus rails)
+- **P5 header**: ~16 pins, mix of Bank 14/35 (P15/P16/P17/N13/N14/U17/L5/L6/W5/W6/J5/J6/T5/R4/M3/R3/U4)
+- **P6 remaining** (after I2S): F4, L4, J4, G4, K3, G3, J2, K2, L1, M1, J1, K1, U1, H3, T6, P5 (16 pins)
+
+That's **~60 free signal pins** for AES3, AES67, MADI, additional I2S channels, GPIO LEDs, debug headers, etc.
+
+### Adding AES3 later (room exists)
+
+AES3 needs very little:
+- **AES3 TX**: 1 differential pair (or 1 single-ended pin into an SN65MLVD or RS422 transmitter chip)
+- **AES3 RX**: 1 single-ended pin from an RS422/differential receiver
+
+A stereo AES3 link with 2-channel multiplexing fits in 2 IOs (1 TX + 1 RX) plus the receiver/transmitter chips. Any pair from the ~60 free pins above works. The `avb-aes3` codebase had AES3 RX/TX modules in `rtl/_aes3_backup/` — port them back if needed.
+
 ## Status
 
-**Phase 1 — scaffolding (in progress)**
-
-- Project structure laid out: `gateware/` (Amaranth + LUNA), `firmware/`,
-  `rtl/` (any custom Verilog), `docs/`.
-- USB UAC2 gateware copied from
-  [adat-usb2-audio-interface@artix7](https://github.com/hansfbaier/adat-usb2-audio-interface/tree/artix7)
-  as the starting point. ADAT-specific bits parked under `gateware/_ref/`.
-- Colorlight i9plus Amaranth platform stub (`colorlight_i9plus_platform.py`)
-  with placeholder ULPI pinout — needs real pins once the breakout PCB is
-  designed.
-
-**Phase 2 — USB enumeration (not started)**
-
-- Hardware: external USB3340 (or USB3300) ULPI breakout wired to i9plus
-  SODIMM pins. ULPI_CLK must land on a clock-capable input.
-- Goal: device enumerates as a UAC2 sound card on the host.
-
-**Phase 3 — AVB integration (not started)**
-
-- Port LiteEth + AVB stack from `../avb-aes3/` (different HDL framework —
-  Migen — so the integration is at the Verilog top-level).
-- Async SRC between USB clock and MCR-locked media clock.
-- AAF talker emits at media-clock rate using gPTP `presentation_time`,
-  not a physical media clock.
+- **Phase 1** ✅ — Project scaffolding, USB UAC2 stack copied from `hansfbaier/adat-usb2-audio-interface@artix7`, ADAT-specific bits parked under `gateware/_ref/`.
+- **Phase 2a** ✅ — Hardware spec locked: USB3300 ULPI breakout on P2.
+- **Phase 2b** 🟡 in progress — `gateware/usb_only_top.py` elaborates cleanly (Fragment.get smoke test passes). Next: actual yosys+nextpnr-xilinx build, real-hardware enumeration test.
+- **Phase 3** ⬜ — port LiteEth + AVB stack from `../avb-aes3/`, async SRC, AAF talker with presentation_time, AVDECC Milan talker descriptors.
 
 ## Layout
 
 | Path | Contents |
 |------|----------|
-| `gateware/` | LUNA / Amaranth USB stack: descriptors, UAC2 endpoints, channel routing |
-| `gateware/colorlight_i9plus_platform.py` | i9plus + ULPI placeholder pinout |
-| `gateware/_ref/` | Reference files (ADAT board / Cyclone platform / original top-level) kept for porting reference |
+| `gateware/colorlight_i9plus_platform.py` | Amaranth platform — pin map for i9plus + ULPI on P2 |
+| `gateware/colorlight_i9plus_car.py` | Clock-and-reset generator (clk25 → sync/fast PLL; usb ← ULPI CLK) |
+| `gateware/usb_only_top.py` | Phase 2b USB-only top-level (loopback) |
+| `gateware/usb_descriptors.py` | UAC2 USB descriptors |
+| `gateware/requesthandlers.py` | UAC2 control endpoint handlers |
+| `gateware/usb_stream_to_channels.py`, `channels_to_usb_stream.py` | USB ↔ per-channel sample stream |
+| `gateware/_ref/` | Reference files from the upstream project (kept for porting) |
 | `gateware/_bench/` | Testbenches and GTKWave configs |
 | `rtl/` | Custom Verilog (will host AVB modules in Phase 3) |
 | `firmware/` | RISC-V firmware (Phase 3) |
 | `docs/` | Design notes |
 
-## Dependencies (TODO — Phase 1.5)
-
-The Amaranth / LUNA stack is NOT yet installed system-wide. To make
-gateware build, install:
+## Building
 
 ```bash
-pip install \
-  git+https://github.com/amaranth-community-unofficial/python-usb-descriptors.git \
-  git+https://github.com/amaranth-community-unofficial/amaranth-boards.git \
-  git+https://github.com/amaranth-community-unofficial/amlib.git \
-  git+https://github.com/amaranth-community-unofficial/usb2-highspeed-core.git
-```
+# One-time: create venv and install deps
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r gateware/requirements.txt    # pins amaranth==0.4.5
 
-(See `gateware/requirements.txt` for the reference set.)
+# Phase 2b build (will invoke yosys + nextpnr-xilinx)
+cd gateware
+python3 usb_only_top.py --action build
+```
 
 ## Why a different HDL framework than avb-aes3?
 
 `avb-aes3/` uses LiteX/Migen. `avb-usb-host/` uses Amaranth + LUNA
-because that's where UAC2 implementations live. We'll bridge the
-two at the Verilog top-level in Phase 3.
+because that's where mature UAC2 implementations live. The two will
+meet at the Verilog top-level when we integrate the AVB stack in
+Phase 3.
