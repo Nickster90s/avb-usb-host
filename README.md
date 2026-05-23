@@ -26,8 +26,8 @@ DAW ── UAC2 OUT ──► [USB device]
 | ULPI signal | i9plus pin | Notes |
 |---|---|---|
 | 3V3, GND | P2 power rails | Power the breakout from these |
-| **CLK** (60 MHz IN from PHY) | **T3** | Bank 35 clock-capable candidate — verify at build |
-| DIR | T4 | |
+| **CLK** (60 MHz IN from PHY) | **T4** | IO_L13N_T2_MRCC_34 (clock-capable) — required for global clock buffer |
+| DIR | T3 | (T3 is plain IO_0_34, not clock-capable — only good for non-clock signals) |
 | NXT | U2 | |
 | STP | U3 | |
 | RST (active-LOW) | R2 | |

@@ -13,7 +13,7 @@
 # main 25 MHz input — keeping that PLL separate from the USB one avoids
 # coupling re-locks during MMCM DRP retuning of the audio rate.
 
-from amaranth import Module, Elaboratable, ClockDomain, Signal, Instance
+from amaranth import Module, Elaboratable, ClockDomain, Signal, Instance, ResetSignal
 from amaranth.lib.cdc import ResetSynchronizer
 
 
@@ -30,12 +30,13 @@ class ColorlightI9PlusCAR(Elaboratable):
     ulpi_clk_pin extension.
     """
 
-    def __init__(self, *, ulpi_clk_pin=None,
+    def __init__(self, *, ulpi_clk_pin=None, usb_phase=-120.0,
                  clock_frequencies=None, clock_signal_name=None):
         # LUNA passes clock_frequencies/clock_signal_name but we don't
         # use them; ulpi_clk_pin is OUR addition — the top-level provides
         # the already-requested ulpi.clk subsignal.
         self.ulpi_clk_pin = ulpi_clk_pin
+        self.usb_phase    = usb_phase
 
     def elaborate(self, platform):
         m = Module()
@@ -64,15 +65,19 @@ class ColorlightI9PlusCAR(Elaboratable):
             p_COMPENSATION    = "INTERNAL",
             p_STARTUP_WAIT    = "FALSE",
             p_DIVCLK_DIVIDE   = 1,
-            p_CLKFBOUT_MULT   = 24,
+            # VCO must be 800-1600 MHz on XC7A50T-1 (UG472). Previous
+            # MULT=24 gave VCO=600 MHz — out of spec; PLL output was
+            # undefined.  MULT=48 → VCO = 25 × 48 = 1200 MHz (well in
+            # spec) gives clean integer dividers for 60 / 200 MHz.
+            p_CLKFBOUT_MULT   = 48,
             p_CLKFBOUT_PHASE  = 0.0,
             p_CLKIN1_PERIOD   = 40.0,            # clk25 → 40 ns period
 
-            p_CLKOUT0_DIVIDE  = 10,              # 600 / 10 = 60 MHz (sync)
+            p_CLKOUT0_DIVIDE  = 20,              # 1200 / 20 = 60 MHz (sync)
             p_CLKOUT0_PHASE   = 0.0,
             p_CLKOUT0_DUTY_CYCLE = 0.5,
 
-            p_CLKOUT1_DIVIDE  = 3,               # 600 / 3 = 200 MHz (fast — adjust if needed)
+            p_CLKOUT1_DIVIDE  = 6,               # 1200 / 6 = 200 MHz (fast)
             p_CLKOUT1_PHASE   = 0.0,
             p_CLKOUT1_DUTY_CYCLE = 0.5,
 
@@ -84,14 +89,43 @@ class ColorlightI9PlusCAR(Elaboratable):
             o_LOCKED   = sys_locked,
         )
 
-        # Drive the clock domains directly from PLL outputs / external clk.
+        # USB-PLL: take ULPI CLK input (60 MHz from PHY) and re-emit
+        # 60 MHz with a phase shift. Mirrors LiteX terasic_deca _CRG
+        # pattern (validated with LUNA): pll.create_clkout(usb, 60e6,
+        # phase=-120). The phase shift aligns the FPGA's sampling
+        # edge inside the ULPI data valid window — without it, the
+        # LUNA register-window FSM exits IDLE briefly but never
+        # completes a write because the data sampled by IOB flops is
+        # past its valid window.
+        #
+        # PLLE2_ADV constraints: VCO 800-1600 MHz on Artix-7 -1 speed.
+        # Use CLKFBOUT_MULT=16 (VCO = 60 × 16 = 960 MHz), CLKOUT0_DIVIDE=16
+        # (60 MHz out), CLKOUT0_PHASE=-120.
+        usbpll_feedback = Signal()
+        usb_clk_pll     = Signal()
+        usb_pll_locked  = Signal()
+        m.submodules.usbpll = Instance("PLLE2_ADV",
+            p_BANDWIDTH         = "OPTIMIZED",
+            p_COMPENSATION      = "INTERNAL",
+            p_STARTUP_WAIT      = "FALSE",
+            p_DIVCLK_DIVIDE     = 1,
+            p_CLKFBOUT_MULT     = 16,
+            p_CLKFBOUT_PHASE    = 0.0,
+            p_CLKIN1_PERIOD     = 16.667,        # 60 MHz period
+            p_CLKOUT0_DIVIDE    = 16,
+            p_CLKOUT0_PHASE     = self.usb_phase,
+            p_CLKOUT0_DUTY_CYCLE= 0.5,
+            i_CLKIN1   = self.ulpi_clk_pin,
+            i_CLKFBIN  = usbpll_feedback,
+            o_CLKFBOUT = usbpll_feedback,
+            o_CLKOUT0  = usb_clk_pll,
+            o_LOCKED   = usb_pll_locked,
+        )
+
         m.d.comb += [
             cd_sync.clk.eq(sys_clk),
             cd_fast.clk.eq(fast_clk),
-            # `usb` is the 60 MHz returned by the USB3300 — independent
-            # of our PLL. LUNA expects this domain to exist; the top-
-            # level passes us the already-requested ulpi.clk subsignal.
-            cd_usb.clk.eq(self.ulpi_clk_pin),
+            cd_usb.clk .eq(usb_clk_pll),
         ]
 
         # Until PLL is locked, hold sync/fast in reset. The usb domain
@@ -99,6 +133,5 @@ class ColorlightI9PlusCAR(Elaboratable):
         reset = ~sys_locked
         m.submodules.reset_sync_sync = ResetSynchronizer(reset, domain="sync")
         m.submodules.reset_sync_fast = ResetSynchronizer(reset, domain="fast")
-        # `usb` reset is asserted by LUNA's own state machine.
 
         return m

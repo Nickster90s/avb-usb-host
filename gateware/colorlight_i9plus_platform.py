@@ -54,14 +54,14 @@ def _dimm(n):
 # FPGA signal pins + 3V3 + GND + 5V rails right on the header — the
 # USB3300 breakout can be powered straight from P2's 3V3 pin.
 #
-# All 13 ULPI signals are Bank-35 pins on P2 (no overlap with the
-# Ethernet PHYs which live in Bank 14/13). CLK on T3 — most likely
-# Bank-35 clock-capable (SRCC/MRCC); if the toolchain rejects it,
-# swap with T4 or U3 (also corner-of-bank, likely clock-capable).
-# The 60 MHz from the USB3300 drives the `ulpi` clock domain.
+# All 13 ULPI signals are Bank-34 pins on P2. CLK MUST be on a clock-
+# capable input — on FGG484, T4 is IO_L13N_T2_MRCC_34, while T3 is just
+# IO_0_34 (NOT clock-capable). Verified against prjxray-db's
+# package_pins.csv. CLK on T3 silently builds but never clocks the
+# ulpi domain because there's no MRCC/SRCC there to feed a BUFG.
 _ULPI_DIMM = {
-    "clk": 49,   # T3   — Bank 35 clock-capable candidate (verify at build)
-    "dir": 51,   # T4
+    "clk": 51,   # T4   — IO_L13N_T2_MRCC_34, MRCC (clock-capable)
+    "dir": 49,   # T3   — regular IO, fine for DIR
     "nxt": 57,   # U2
     "stp": 59,   # U3
     "rst": 41,   # R2   — active-LOW per USB3300 datasheet
@@ -83,6 +83,15 @@ class ColorlightI9PlusPlatform(XilinxPlatform):
     package     = "fgg484"
     speed       = "1"
     default_clk = "clk25"
+
+    # LUNA platform attributes — without ignore_phy_vbus, the reset
+    # sequencer waits for VBUS detection via PHY RxCmd messages, but
+    # those never arrive on first power-up of a USB3300 → controller
+    # stalls in IDLE, no register writes, no D[7:0] activity.
+    # default_usb_connection tells LUNA which platform resource is the
+    # USB PHY.
+    default_usb_connection = "ulpi"
+    ignore_phy_vbus        = True
 
     # Required by LUNA's top_level_cli — gives the generated SoC its
     # own sync/usb/fast clock domains.
@@ -118,16 +127,32 @@ class ColorlightI9PlusPlatform(XilinxPlatform):
                  Attrs(IOSTANDARD="LVCMOS33")),
 
         # ----- USB HS via external ULPI breakout -----
-        # PLACEHOLDER pinout — update once breakout PCB exists.
+        # IMPORTANT: separate the ULPI CLK into its own Resource.
+        # When clk is a Subsignal of `ulpi`, yosys+nextpnr-xilinx does
+        # not always produce the global-clock-buffer insertion that
+        # LUNA's ULPI controller needs. Matching usbsniffer (the only
+        # listed-as-fully-supported Artix-7 + USB3300 LUNA platform).
+        Resource("ulpi_clock", 0, Pins(_dimm(_ULPI_DIMM["clk"]), dir="i"),
+                 Clock(60e6), Attrs(IOSTANDARD="LVCMOS33")),
+
         Resource("ulpi", 0,
-            Subsignal("clk",  Pins(_dimm(_ULPI_DIMM["clk"]), dir="i"),
-                      Clock(60e6)),
-            Subsignal("dir",  Pins(_dimm(_ULPI_DIMM["dir"]), dir="i")),
-            Subsignal("nxt",  Pins(_dimm(_ULPI_DIMM["nxt"]), dir="i")),
-            Subsignal("stp",  Pins(_dimm(_ULPI_DIMM["stp"]), dir="o")),
-            Subsignal("rst",  PinsN(_dimm(_ULPI_DIMM["rst"]), dir="o")),
+            # IOB=TRUE on the inputs: forces the first register driven
+            # by each input pin to be packed into the IOB block,
+            # eliminating fabric-routing delay. Without this on
+            # yosys+nextpnr-xilinx the input flops land deep in the
+            # fabric and the ULPI 60 MHz setup time can't be met.
+            # Quartus does this automatically; the open Xilinx toolchain
+            # needs an explicit attr.
+            Subsignal("dir",  Pins(_dimm(_ULPI_DIMM["dir"]), dir="i"),
+                      Attrs(IOB="TRUE")),
+            Subsignal("nxt",  Pins(_dimm(_ULPI_DIMM["nxt"]), dir="i"),
+                      Attrs(IOB="TRUE")),
+            Subsignal("stp",  Pins(_dimm(_ULPI_DIMM["stp"]), dir="o"),
+                      Attrs(IOB="TRUE")),
+            Subsignal("rst",  Pins(_dimm(_ULPI_DIMM["rst"]), dir="o")),
             Subsignal("data", Pins(" ".join(_dimm(_ULPI_DIMM[f"d{i}"]) for i in range(8)),
-                                   dir="io")),
+                                   dir="io"),
+                      Attrs(IOB="TRUE")),
             Attrs(IOSTANDARD="LVCMOS33", SLEW="FAST")),
 
         # The AVB-side Ethernet PHYs (PHY0 + PHY1) will be added in Phase 3

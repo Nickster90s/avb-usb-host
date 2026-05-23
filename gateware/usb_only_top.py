@@ -8,7 +8,7 @@
 # Once this enumerates on the host and round-trips audio cleanly, we
 # integrate with the AVB stack in Phase 3.
 
-from amaranth import Module, Signal, Elaboratable, Shape
+from amaranth import Module, Signal, Elaboratable, Shape, Mux
 
 from luna                                 import top_level_cli
 from luna.gateware.usb.usb2.device        import USBDevice
@@ -40,16 +40,26 @@ class USBLoopback(Elaboratable):
     def elaborate(self, platform):
         m = Module()
 
-        # ULPI on P2 header — bus index 0 (we only have one PHY).
-        # Request BEFORE the CAR so we can hand the clk pin to it.
-        ulpi = platform.request("ulpi", 0)
+        # ULPI on P2 header — clk is its OWN resource (usbsniffer pattern,
+        # see platform.py comment). Request both before the CAR.
+        ulpi_clk = platform.request("ulpi_clock", 0)
+        ulpi     = platform.request("ulpi", 0)
 
         # Bring up sync/usb/fast clock domains. usb domain rides the
-        # 60 MHz CLK that the USB3300 sources back into the FPGA.
+        # 60 MHz CLK that the USB3300 sources back into the FPGA,
+        # phase-shifted through a PLL for proper sampling alignment.
+        # Phase can be overridden via USB_PHASE env var for sweeping.
+        import os
+        usb_phase = float(os.environ.get("USB_PHASE", "-120"))
         m.submodules.car = platform.clock_domain_generator(
-            ulpi_clk_pin=ulpi.clk.i)
+            ulpi_clk_pin=ulpi_clk.i, usb_phase=usb_phase)
 
-        m.submodules.usb = usb = USBDevice(bus=ulpi)
+        # Baseline LUNA setup: handle_clocking=True is the default;
+        # we drive cd_usb.clk from ulpi.clk.i in our CAR and LUNA's
+        # ULPI controller does the same. In Amaranth those two comb
+        # drives of the same signal collapse to one wire — confirmed
+        # by inspecting top.v.
+        m.submodules.usb = usb = USBDevice(bus=ulpi, handle_clocking=False)
 
         descriptors      = USBDescriptors(use_ila=False, ila_max_packet_size=512)
         usb_descriptors  = descriptors.create_usb2_descriptors(
@@ -94,6 +104,21 @@ class USBLoopback(Elaboratable):
 
         # Connect — tell USB host we're ready.
         m.d.comb += usb.connect.eq(1)
+
+        # STP+NXT-both-seen latch. Slow blink → no successful ULPI
+        # write completed. Fast blink → PHY accepted at least one
+        # write from LUNA = phase shift is in the right window.
+        led               = platform.request("user_led", 0)
+        counter           = Signal(26)
+        stp_seen          = Signal()
+        nxt_seen          = Signal()
+        m.d.usb          += [
+            counter.eq(counter + 1),
+            stp_seen.eq(stp_seen | ulpi.stp.o),
+            nxt_seen.eq(nxt_seen | ulpi.nxt.i),
+        ]
+        both = stp_seen & nxt_seen
+        m.d.comb += led.o.eq(Mux(both, counter[21], counter[25]))
         return m
 
 
