@@ -39,6 +39,11 @@ class UAC2RequestHandlers(USBRequestHandler):
             with m.If((setup.recipient == USBRequestRecipient.INTERFACE) &
                       (setup.request == USBStandardRequests.SET_INTERFACE)):
 
+                # Claim this request so the mux routes to us (newer
+                # usb2-highspeed-core requires interface.claim; the older
+                # adat-usb2 handler this was copied from predates it).
+                m.d.comb += interface.claim.eq(1)
+
                 interface_nr   = setup.index
                 alt_setting_nr = setup.value
 
@@ -73,6 +78,9 @@ class UAC2RequestHandlers(USBRequestHandler):
         ZERO        = Const(0, 32)
 
         with m.Elif(setup.type == USBRequestType.CLASS):
+            # Claim ALL class requests — this device owns the audio class
+            # space; unknown ones fall to the Default stall below.
+            m.d.comb += interface.claim.eq(1)
             with m.Switch(setup.request):
                 with m.Case(AudioClassSpecificRequestCodes.RANGE):
                     m.d.comb += transmitter.stream.attach(self.interface.tx)
@@ -123,6 +131,7 @@ class UAC2RequestHandlers(USBRequestHandler):
                         m.d.comb += interface.handshakes_out.stall.eq(1)
 
         with m.Elif(setup.type == USBRequestType.VENDOR):
+            m.d.comb += interface.claim.eq(1)
             with m.Switch(setup.request):
                 with m.Case(VendorRequests.ILA_STOP_CAPTURE):
                     # TODO - will be implemented when needed
