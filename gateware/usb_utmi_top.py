@@ -84,34 +84,39 @@ class USBLoopbackUTMI(Elaboratable):
             ulpi.data.oe.eq(~ulpi.dir.i),
         ]
 
-        # --- Falling-edge input sampling -------------------------------
-        # openXC7's prjxray FASM backend can't assemble IDDR primitives
-        # (IndexError in fasm_assembler), so we get the equivalent
-        # half-cycle margin with a falling-edge clock domain made of
-        # ordinary fabric flops. The ULPI inputs are registered on the
-        # FALLING edge of the usb clock (~8 ns after the PHY drives them
-        # on its rising edge) and handed to the wrapper which runs on
-        # the rising edge — sampling squarely inside the data-valid
-        # window for the PHY→FPGA round-trip delay.
-        # SAMPLE_EDGE=pos reverts to rising-edge (no extra margin) for A/B.
-        sample_edge = os.environ.get("SAMPLE_EDGE", "neg")
-        cd_sample = ClockDomain("usb_sample", clk_edge=sample_edge, local=True)
-        m.domains += cd_sample
-        m.d.comb += cd_sample.clk.eq(ClockSignal("usb"))
+        # Feed the wrapper the RAW ULPI input pins directly — exactly
+        # like the ulpi_phasescan FSM that reads reg 0x24 correctly at
+        # phase 0. The earlier falling-edge re-sampling layer added a
+        # half-cycle that mis-timed the wrapper (worked for the read FSM
+        # without it, failed for the wrapper with it). SAMPLE_EDGE can
+        # re-enable a sampling layer for A/B, default off (raw).
+        sample_edge = os.environ.get("SAMPLE_EDGE", "off")
+        if sample_edge == "off":
+            data_s, dir_s, nxt_s = ulpi.data.i, ulpi.dir.i, ulpi.nxt.i
+        else:
+            cd_sample = ClockDomain("usb_sample", clk_edge=sample_edge, local=True)
+            m.domains += cd_sample
+            m.d.comb += cd_sample.clk.eq(ClockSignal("usb"))
+            data_s = Signal(8); dir_s = Signal(); nxt_s = Signal()
+            m.d.usb_sample += [
+                data_s.eq(ulpi.data.i), dir_s.eq(ulpi.dir.i), nxt_s.eq(ulpi.nxt.i),
+            ]
 
-        data_s = Signal(8)
-        dir_s  = Signal()
-        nxt_s  = Signal()
-        m.d.usb_sample += [
-            data_s.eq(ulpi.data.i),
-            dir_s .eq(ulpi.dir.i),
-            nxt_s .eq(ulpi.nxt.i),
-        ]
+        # Startup reset pulse for the wrapper: ResetSignal("usb") is
+        # never asserted, so the wrapper never gets a clean reset to
+        # kick off its init / register-config sequence. Hold its reset
+        # high for the first ~64 usb cycles after boot, then release.
+        wrap_rst   = Signal(reset=1)
+        wrap_rstcnt = Signal(7, reset=0)
+        with m.If(~wrap_rstcnt.all()):
+            m.d.usb += wrap_rstcnt.eq(wrap_rstcnt + 1)
+        with m.Else():
+            m.d.usb += wrap_rst.eq(0)
 
-        # Instantiate the wrapper, fed by the IDDR-sampled inputs.
+        # Instantiate the wrapper, fed by the raw (or sampled) inputs.
         m.submodules.ulpi_wrap = Instance("ulpi_wrapper",
             i_ulpi_clk60_i      = ClockSignal("usb"),
-            i_ulpi_rst_i        = ResetSignal("usb"),
+            i_ulpi_rst_i        = wrap_rst,
             i_ulpi_data_out_i   = data_s,          # IDDR-sampled bus read
             i_ulpi_dir_i        = dir_s,
             i_ulpi_nxt_i        = nxt_s,
@@ -184,13 +189,11 @@ class USBLoopbackUTMI(Elaboratable):
 
         m.d.comb += usb.connect.eq(1)
 
-        # Diagnostic LED: did the ultraembedded wrapper ever complete a
-        # ULPI register write? It pulses STP at the end of every write,
-        # and the PHY pulses NXT to accept each byte. Latch both.
-        #   slow blink → wrapper never completes a write (ULPI timing) →
-        #                 scope the bus.
-        #   fast blink → wrapper IS writing PHY registers → problem is
-        #                 downstream (UTMI↔LUNA bridge / descriptors).
+        # Diagnostic LED: does the wrapper complete ULPI writes at THIS
+        # phase? (LUNA drives the controls — confirmed term_select fast.)
+        # STP pulses at the end of each write; NXT pulses per accepted byte.
+        #   slow → wrapper not completing writes at this phase
+        #   fast → wrapper completing writes → issue is downstream in LUNA
         led      = platform.request("user_led", 0)
         counter  = Signal(26)
         stp_seen = Signal()
