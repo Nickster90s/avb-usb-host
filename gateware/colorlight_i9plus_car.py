@@ -30,13 +30,22 @@ class ColorlightI9PlusCAR(Elaboratable):
     ulpi_clk_pin extension.
     """
 
-    def __init__(self, *, ulpi_clk_pin=None, usb_phase=-120.0,
+    def __init__(self, *, ulpi_clk_pin=None, usb_phase=-120.0, usb_pll=True,
+                 usb_invert=False,
                  clock_frequencies=None, clock_signal_name=None):
         # LUNA passes clock_frequencies/clock_signal_name but we don't
         # use them; ulpi_clk_pin is OUR addition — the top-level provides
         # the already-requested ulpi.clk subsignal.
         self.ulpi_clk_pin = ulpi_clk_pin
         self.usb_phase    = usb_phase
+        # usb_pll=False → drive cd_usb.clk straight from the ULPI clock
+        # pin (tools insert a BUFG). Matches ultraembedded's validated
+        # Spartan-6 setup (raw PHY clock, no PLL). usb_pll=True → run
+        # the ULPI clock through a phase-shifting PLL.
+        self.usb_pll      = usb_pll
+        # usb_invert=True → cd_usb runs on the inverted ULPI clock
+        # (falling edge). Only meaningful when usb_pll=False.
+        self.usb_invert   = usb_invert
 
     def elaborate(self, platform):
         m = Module()
@@ -101,32 +110,44 @@ class ColorlightI9PlusCAR(Elaboratable):
         # PLLE2_ADV constraints: VCO 800-1600 MHz on Artix-7 -1 speed.
         # Use CLKFBOUT_MULT=16 (VCO = 60 × 16 = 960 MHz), CLKOUT0_DIVIDE=16
         # (60 MHz out), CLKOUT0_PHASE=-120.
-        usbpll_feedback = Signal()
-        usb_clk_pll     = Signal()
-        usb_pll_locked  = Signal()
-        m.submodules.usbpll = Instance("PLLE2_ADV",
-            p_BANDWIDTH         = "OPTIMIZED",
-            p_COMPENSATION      = "INTERNAL",
-            p_STARTUP_WAIT      = "FALSE",
-            p_DIVCLK_DIVIDE     = 1,
-            p_CLKFBOUT_MULT     = 16,
-            p_CLKFBOUT_PHASE    = 0.0,
-            p_CLKIN1_PERIOD     = 16.667,        # 60 MHz period
-            p_CLKOUT0_DIVIDE    = 16,
-            p_CLKOUT0_PHASE     = self.usb_phase,
-            p_CLKOUT0_DUTY_CYCLE= 0.5,
-            i_CLKIN1   = self.ulpi_clk_pin,
-            i_CLKFBIN  = usbpll_feedback,
-            o_CLKFBOUT = usbpll_feedback,
-            o_CLKOUT0  = usb_clk_pll,
-            o_LOCKED   = usb_pll_locked,
-        )
-
         m.d.comb += [
             cd_sync.clk.eq(sys_clk),
             cd_fast.clk.eq(fast_clk),
-            cd_usb.clk .eq(usb_clk_pll),
         ]
+
+        if self.usb_pll:
+            usbpll_feedback = Signal()
+            usb_clk_pll     = Signal()
+            usb_pll_locked  = Signal()
+            m.submodules.usbpll = Instance("PLLE2_ADV",
+                p_BANDWIDTH         = "OPTIMIZED",
+                p_COMPENSATION      = "INTERNAL",
+                p_STARTUP_WAIT      = "FALSE",
+                p_DIVCLK_DIVIDE     = 1,
+                p_CLKFBOUT_MULT     = 16,
+                p_CLKFBOUT_PHASE    = 0.0,
+                p_CLKIN1_PERIOD     = 16.667,        # 60 MHz period
+                p_CLKOUT0_DIVIDE    = 16,
+                p_CLKOUT0_PHASE     = self.usb_phase,
+                p_CLKOUT0_DUTY_CYCLE= 0.5,
+                i_CLKIN1   = self.ulpi_clk_pin,
+                i_CLKFBIN  = usbpll_feedback,
+                o_CLKFBOUT = usbpll_feedback,
+                o_CLKOUT0  = usb_clk_pll,
+                o_LOCKED   = usb_pll_locked,
+            )
+            m.d.comb += cd_usb.clk.eq(usb_clk_pll)
+        elif self.usb_invert:
+            # Inverted ULPI clock → whole usb domain runs on the PHY's
+            # falling edge. Shifts BOTH input sampling and output driving
+            # by half a 60 MHz period (~8.3 ns), compensating the
+            # PHY↔FPGA round-trip skew in both directions at once. This
+            # is the Sipeed Tang Primer 20K `~ulpi_clk` recipe.
+            m.d.comb += cd_usb.clk.eq(~self.ulpi_clk_pin)
+        else:
+            # Raw ULPI clock straight to the usb domain. The tools
+            # insert a BUFG. Matches ultraembedded's validated setup.
+            m.d.comb += cd_usb.clk.eq(self.ulpi_clk_pin)
 
         # Until PLL is locked, hold sync/fast in reset. The usb domain
         # comes up when the PHY enables itself.

@@ -16,7 +16,8 @@
 # LUNA assumes for plain UTMI buses.
 
 import os
-from amaranth import Module, Signal, Elaboratable, Instance, ClockSignal, ResetSignal
+from amaranth import (Module, Signal, Elaboratable, Instance, ClockSignal,
+                      ResetSignal, ClockDomain)
 
 from luna                            import top_level_cli
 from luna.gateware.usb.usb2.device   import USBDevice
@@ -52,10 +53,23 @@ class USBLoopbackUTMI(Elaboratable):
         ulpi_clk = platform.request("ulpi_clock", 0)
         ulpi     = platform.request("ulpi", 0)
 
-        # usb clock domain rides the PHY's 60 MHz (phase-shifted via PLL).
-        usb_phase = float(os.environ.get("USB_PHASE", "-120"))
-        m.submodules.car = platform.clock_domain_generator(
-            ulpi_clk_pin=ulpi_clk.i, usb_phase=usb_phase)
+        # usb clock domain: raw PHY 60 MHz via BUFG (no PLL) by default,
+        # matching ultraembedded's validated setup. USB_PHASE=raw → no
+        # PLL; a numeric USB_PHASE → phase-shift PLL.
+        # USB_PHASE: "raw" (BUFG, posedge), "inv" (BUFG, inverted/falling
+        # edge — Tang Primer recipe, fixes RX+TX skew together), or a
+        # numeric phase value (PLL).
+        usb_phase_env = os.environ.get("USB_PHASE", "inv")
+        if usb_phase_env == "raw":
+            m.submodules.car = platform.clock_domain_generator(
+                ulpi_clk_pin=ulpi_clk.i, usb_pll=False)
+        elif usb_phase_env == "inv":
+            m.submodules.car = platform.clock_domain_generator(
+                ulpi_clk_pin=ulpi_clk.i, usb_pll=False, usb_invert=True)
+        else:
+            m.submodules.car = platform.clock_domain_generator(
+                ulpi_clk_pin=ulpi_clk.i, usb_pll=True,
+                usb_phase=float(usb_phase_env))
 
         # USB3300 RESET is active-high; tie low to keep transceiver enabled.
         m.d.comb += ulpi.rst.o.eq(0)
@@ -70,13 +84,37 @@ class USBLoopbackUTMI(Elaboratable):
             ulpi.data.oe.eq(~ulpi.dir.i),
         ]
 
-        # Instantiate the wrapper.
+        # --- Falling-edge input sampling -------------------------------
+        # openXC7's prjxray FASM backend can't assemble IDDR primitives
+        # (IndexError in fasm_assembler), so we get the equivalent
+        # half-cycle margin with a falling-edge clock domain made of
+        # ordinary fabric flops. The ULPI inputs are registered on the
+        # FALLING edge of the usb clock (~8 ns after the PHY drives them
+        # on its rising edge) and handed to the wrapper which runs on
+        # the rising edge — sampling squarely inside the data-valid
+        # window for the PHY→FPGA round-trip delay.
+        # SAMPLE_EDGE=pos reverts to rising-edge (no extra margin) for A/B.
+        sample_edge = os.environ.get("SAMPLE_EDGE", "neg")
+        cd_sample = ClockDomain("usb_sample", clk_edge=sample_edge, local=True)
+        m.domains += cd_sample
+        m.d.comb += cd_sample.clk.eq(ClockSignal("usb"))
+
+        data_s = Signal(8)
+        dir_s  = Signal()
+        nxt_s  = Signal()
+        m.d.usb_sample += [
+            data_s.eq(ulpi.data.i),
+            dir_s .eq(ulpi.dir.i),
+            nxt_s .eq(ulpi.nxt.i),
+        ]
+
+        # Instantiate the wrapper, fed by the IDDR-sampled inputs.
         m.submodules.ulpi_wrap = Instance("ulpi_wrapper",
             i_ulpi_clk60_i      = ClockSignal("usb"),
             i_ulpi_rst_i        = ResetSignal("usb"),
-            i_ulpi_data_out_i   = ulpi.data.i,     # data read FROM bus
-            i_ulpi_dir_i        = ulpi.dir.i,
-            i_ulpi_nxt_i        = ulpi.nxt.i,
+            i_ulpi_data_out_i   = data_s,          # IDDR-sampled bus read
+            i_ulpi_dir_i        = dir_s,
+            i_ulpi_nxt_i        = nxt_s,
             o_ulpi_data_in_o    = ulpi_data_drive, # data to DRIVE onto bus
             o_ulpi_stp_o        = ulpi.stp.o,
 
