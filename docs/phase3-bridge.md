@@ -96,3 +96,31 @@ P3.6  AVDECC: expose the USB-fed talker as a Milan stream (descriptors).
   build shifts ULPI routing/timing, re-confirm phase 0 is clean.
 - pin/bank conflicts: ULPI on P2 (bank 34) vs LiteEth RGMII (bank 14/35
   per avb-aes3) — verify in the merged platform.
+
+## P3.2 build result (2026-05-26)
+
+Integrated the USB sink into avb-aes3 (commits e9fb257 + 6251d34) and
+built the combined design. Outcome:
+
+- ✅ FITS the XC7A50T (placement legalised, routing overuse=0, bitstream
+  generated). AVB stack + ~16k-line USB block coexist resource-wise.
+- ✅ USB 60 MHz domain, eth_rx_clk, audio_clk all meet timing.
+- ❌ **eth_tx_clk fails 125 MHz.** Seed sweep (seeds 1-8) gave eth_tx_clk
+  92/97/97/104/102/106/97/112 MHz — a tight 92-112 cluster, none ≥125,
+  no trend toward passing. **Congestion-limited, not seed-limited**: the
+  USB block crowds the fabric and stretches the RGMII TX routing. A seed
+  sweep cannot close a 13-30 MHz structural gap.
+
+### Options to resolve (pick next session)
+1. **100 Mbps Ethernet** — RGMII eth_tx_clk → 25 MHz, trivially met.
+   8ch×48k×24b ≈ 18 Mbps ≪ 100 Mbps so bandwidth is fine. Fastest path to
+   a working combined bitstream; verify Milan peers accept 100 Mbps.
+2. **Floorplan** the USB block away from the RGMII TX region (nextpnr
+   region constraints) — keeps gigabit; more work.
+3. **Pipeline RGMII TX / trim logic** (fewer USB channels, drop unused
+   endpoints) to relieve congestion.
+4. Keep USB + AVB as **separate bitstreams** and bridge later.
+
+Recommended: (1) for a fast functional end-to-end test, then (2) for
+production gigabit. Both halves are proven individually; only the merged
+gigabit timing is open.
