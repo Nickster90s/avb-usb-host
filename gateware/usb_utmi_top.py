@@ -184,11 +184,24 @@ class USBLoopbackUTMI(Elaboratable):
 
         m.d.comb += usb.connect.eq(1)
 
-        # Heartbeat LED (usb domain).
+        # Diagnostic LED: did the ultraembedded wrapper ever complete a
+        # ULPI register write? It pulses STP at the end of every write,
+        # and the PHY pulses NXT to accept each byte. Latch both.
+        #   slow blink → wrapper never completes a write (ULPI timing) →
+        #                 scope the bus.
+        #   fast blink → wrapper IS writing PHY registers → problem is
+        #                 downstream (UTMI↔LUNA bridge / descriptors).
         led      = platform.request("user_led", 0)
         counter  = Signal(26)
-        m.d.usb += counter.eq(counter + 1)
-        m.d.comb += led.o.eq(counter[-1])
+        stp_seen = Signal()
+        nxt_seen = Signal()
+        m.d.usb += [
+            counter.eq(counter + 1),
+            stp_seen.eq(stp_seen | ulpi.stp.o),
+            nxt_seen.eq(nxt_seen | ulpi.nxt.i),
+        ]
+        from amaranth import Mux
+        m.d.comb += led.o.eq(Mux(stp_seen & nxt_seen, counter[21], counter[25]))
 
         return m
 
