@@ -69,6 +69,7 @@ class UlpiPhaseScan(Elaboratable):
         startup   = Signal(range(self.CYCLES_1MS + 1))
         ready     = Signal()
         match_seen = Signal()
+        err_seen  = Signal()
         captured  = Signal(8)
 
         m.d.usb += startup.eq(Mux(ready, startup, startup + 1))
@@ -99,17 +100,25 @@ class UlpiPhaseScan(Elaboratable):
                 # DIR high, NXT low → register data is on the bus.
                 m.d.comb += [drive.eq(0x00), ulpi.stp.o.eq(0)]
                 m.d.usb += captured.eq(data_i)
-                with m.If(captured == self.EXPECT):
-                    m.d.usb += match_seen.eq(1)
-                # When DIR drops, the PHY has released the bus.
+                # When DIR drops, the read is done — check the result.
                 with m.If(~dir_i):
+                    with m.If(captured == self.EXPECT):
+                        m.d.usb += match_seen.eq(1)
+                    with m.Else():
+                        m.d.usb += err_seen.eq(1)   # ANY bad read flags error
                     m.next = "IDLE"
 
-        # LED: fast once we've ever read 0x24 correctly, slow otherwise.
+        # ROBUST eye finder: fast blink ONLY if many reads succeeded AND
+        # not a single one ever returned wrong data. A marginal phase
+        # produces occasional bad reads → err_seen latches → slow blink.
+        # Sweep USB_PHASE and pick the CENTRE of the fast-blink window.
+        #   fast → zero errors (solid eye at this phase)
+        #   slow → at least one bad read (marginal/closed eye)
         led     = platform.request("user_led", 0)
         counter = Signal(26)
         m.d.usb += counter.eq(counter + 1)
-        m.d.comb += led.o.eq(Mux(match_seen, counter[21], counter[25]))
+        good = match_seen & ~err_seen
+        m.d.comb += led.o.eq(Mux(good, counter[21], counter[25]))
 
         return m
 
