@@ -27,10 +27,10 @@ DAW ── UAC2 OUT ──► [USB device]
 |---|---|---|
 | 3V3, GND | P2 power rails | Power the breakout from these |
 | **CLK** (60 MHz IN from PHY) | **T4** | IO_L13N_T2_MRCC_34 (clock-capable) — required for global clock buffer |
-| DIR | T3 | (T3 is plain IO_0_34, not clock-capable — only good for non-clock signals) |
+| DIR | T3 | plain IO_0_34, not clock-capable — fine for non-clock signal |
 | NXT | U2 | |
 | STP | U3 | |
-| RST (active-LOW) | R2 | |
+| **RST (ACTIVE-HIGH)** | R2 | USB3300 pin 9 is active-HIGH; platform uses `Pins` (not `PinsN`) so driving 0 releases the transceiver. Static — does not toggle during operation. |
 | DATA0 | V2 | |
 | DATA1 | V3 | |
 | DATA2 | W1 | |
@@ -40,7 +40,54 @@ DAW ── UAC2 OUT ──► [USB device]
 | DATA6 | AB1 | |
 | DATA7 | Y2 | |
 
-If T3 turns out not to be MRCC/SRCC on this package, swap with T4 or U3 (also Bank 35 corner — likely clock-capable).
+### ⚠️ ULPI WIRING SPEC — signal integrity is critical (60 MHz source-synchronous bus)
+
+ULPI is a 60 MHz bidirectional source-synchronous bus. With loose / mis-paired
+jumper wires the CLK↔data skew is uncontrolled and **per-pin**, so no gateware
+clock-phase setting can compensate — the link cannot complete a single ULPI
+register write even though everything builds, clocks, and the manual ULPI
+driver (`ulpi_force_top.py`) gets a PHY NXT response. This was the wall hit
+in the 2026-05 bring-up.
+
+**Rule: each timing-critical signal's twisted-pair partner must be GROUND,
+never another active signal.** Pairing CLK with any switching signal injects
+jitter into CLK and corrupts the sampling of every line. Do NOT pair by
+physical header adjacency — the breakout and i9plus P2 pin orders differ, so
+adjacency pairing scrambles the groupings.
+
+**Twisted-pair grouping (Cat5e, ~7 cm, all same length):**
+
+Cable 1 — timing-critical, each signal twisted with its OWN ground:
+| Pair | Signal (FPGA pin) | Partner |
+|---|---|---|
+| 1 | **CLK (T4)** | **GND** ← #1 priority, never share |
+| 2 | NXT (U2) | GND ← sampled every cycle |
+| 3 | DIR (T3) | GND ← sampled every cycle |
+| 4 | STP (U3) | GND |
+
+Cable 2 — data bus (less timing-critical than CLK/NXT/DIR; pair with GND if
+you have spare pairs, otherwise data+data is acceptable):
+| Pair | Signals |
+|---|---|
+| 1 | D0 (V2) + GND  *(or D0+D1)* |
+| 2 | D2 (W1) + GND  *(or D2+D3)* |
+| 3 | D4 (Y1) + GND  *(or D4+D5)* |
+| 4 | D6 (AB1) + GND *(or D6+D7)* |
+
+**RST (R2)** is static — a loose single wire is fine.
+
+GND is available on the P2 header power rail. On the 200-pin SODIMM, GND sits
+at pin numbers 39, 40, 55, 56, 105, 106, 107, 108 (near the P2 ULPI block) —
+use a *separate* GND wire for each critical pair, not a shared daisy-chain.
+
+**The single highest-impact fix: CLK must be twisted with GND alone.**
+
+The proper long-term solution is a custom breakout PCB with length-matched
+ULPI routing (CLK and all 11 signals within ~5–10 mm of each other). This is
+also required for a production-grade product.
+
+If T3 turns out not to be MRCC/SRCC on this package, swap CLK to T4 or U3
+(also Bank 34 corner — likely clock-capable).
 
 ### I2S DAC (PCM5102A) → P6 header
 
