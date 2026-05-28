@@ -1,0 +1,55 @@
+avb-usb-host — USB UAC2 → AVB-Milan audio interface
+Copyright 2025-2026 Nick (nick.eventslight@gmail.com)
+
+This product includes software developed by third parties; see
+LICENSING.md for the per-component summary. The list below lists each
+component and the license under which it was obtained.
+
+------------------------------------------------------------------------
+1. ULPI ↔ UTMI Verilog wrapper (rtl/ulpi_ultraembedded/ulpi_wrapper.v)
+   Upstream: https://github.com/ultraembedded/core_ulpi_wrapper
+   Copyright (c) 2015–2020 ultraembedded
+   License: GPL (any later version)
+   Vendored verbatim. The combined bitstream is a derivative work of
+   GPL'd code. Commercial users should review ultraembedded's
+   commercial-license offer (mentioned in the file header).
+------------------------------------------------------------------------
+2. USB descriptors + reference files
+   gateware/usb_descriptors.py
+   gateware/_ref/adat_usb2_audio_interface.py
+   gateware/_ref/adatface_rev0_baseboard.py
+   gateware/_ref/platforms.py
+   Upstream: https://github.com/hansfbaier/adat-usb2-audio-interface
+   Copyright (c) 2021 Hans Baier <hansfbaier@gmail.com>
+   License: CERN-OHL-W-2.0 (CERN Open Hardware Licence v2 — Weakly
+            Reciprocal)
+   Original SPDX-License-Identifier headers preserved in each file.
+   Modifications to these files must be released under the same
+   licence per the CERN-OHL-W-2.0 terms.
+------------------------------------------------------------------------
+3. LUNA (USB device framework)
+   Upstream: https://github.com/greatscottgadgets/luna
+   License: BSD-3-Clause (per upstream)
+   Runtime dependency, imported via pip; not vendored.
+------------------------------------------------------------------------
+4. usb2-highspeed-core fork (and amlib, adat-core, etc.)
+   Upstream: https://github.com/amaranth-community-unofficial/*
+   License: BSD-3-Clause (per upstream — verify per package)
+   Runtime dependencies, imported via pip; not vendored.
+------------------------------------------------------------------------
+5. Amaranth HDL
+   Upstream: https://github.com/amaranth-lang/amaranth
+   License: BSD-2-Clause
+   Runtime dependency.
+------------------------------------------------------------------------
+6. openXC7 build toolchain (yosys + nextpnr-xilinx + prjxray-db)
+   Upstream: https://github.com/openXC7/toolchain-installer
+   License: various permissive (per upstream)
+   Build dependency; not vendored.
+------------------------------------------------------------------------
+
+All other source code in this repository — in particular the i9plus
+platform / CAR templates, the ULPI scan / dump / minitest / force /
+phasescan tools, the channel-stream plumbing, and the avb-aes3 →
+avb-usb-host integration glue — is original work and is licensed under
+the Apache License, Version 2.0 — see LICENSE.

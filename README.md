@@ -411,4 +411,4 @@ gotcha in section 1.
 
 ## License
 
-(TBD — pick one before this gets serious community attention.)
+See `LICENSE`, `NOTICE`, and `LICENSING.md`. Short version: Apache 2.0 for our original code; `rtl/ulpi_ultraembedded/ulpi_wrapper.v` is GPL (upstream); `gateware/usb_descriptors.py` and `gateware/_ref/*` are CERN-OHL-W-2.0 (upstream).
