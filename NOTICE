@@ -14,8 +14,7 @@ component and the license under which it was obtained.
    GPL'd code. Commercial users should review ultraembedded's
    commercial-license offer (mentioned in the file header).
 ------------------------------------------------------------------------
-2. USB descriptors + reference files
-   gateware/usb_descriptors.py
+2. Reference files (kept for porting / study only)
    gateware/_ref/adat_usb2_audio_interface.py
    gateware/_ref/adatface_rev0_baseboard.py
    gateware/_ref/platforms.py
@@ -26,6 +25,12 @@ component and the license under which it was obtained.
    Original SPDX-License-Identifier headers preserved in each file.
    Modifications to these files must be released under the same
    licence per the CERN-OHL-W-2.0 terms.
+
+   NOTE: gateware/usb_descriptors.py was bootstrapped from this project
+   but has since been REWRITTEN FROM SCRATCH against the public
+   usb_protocol UAC2 API + the UAC2 spec, and is now original work under
+   Apache-2.0 (see its header + the README Acknowledgements). It is no
+   longer a derivative of the CERN-OHL-W-2.0 source.
 ------------------------------------------------------------------------
 3. LUNA (USB device framework)
    Upstream: https://github.com/greatscottgadgets/luna

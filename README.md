@@ -393,8 +393,40 @@ gotcha in section 1.
 
 ---
 
+## Acknowledgements
+
+This project owes its starting point to Hans Baier's
+[**adat-usb2-audio-interface**](https://github.com/hansfbaier/adat-usb2-audio-interface).
+
+When I set out to build a standalone USB-Audio → AVB bridge on an
+open FPGA toolchain, the hardest question wasn't *how* — it was
+*whether it was even possible* to get a real USB Audio Class 2.0
+device running with Amaranth + LUNA on yosys + nextpnr-xilinx, with no
+Vivado and no vendor IP. Hans's ADAT interface was the proof that it
+**could** be done: a working, multichannel UAC2 device built on exactly
+this Amaranth/LUNA foundation. Seeing that it worked gave me the
+confidence to commit to this path.
+
+The early bring-up here was bootstrapped from that project's USB stack
+and descriptor structure, and the LUNA request-handler patterns were an
+invaluable reference. Everything has since been rewritten for this
+product — the descriptors are now our own clean UAC2 topology
+(`gateware/usb_descriptors.py`, Apache-2.0), the platform/CAR are
+i9plus-specific, and the AVB side is a separate LiteX SoC — but the
+spark, and the "yes, this is achievable" moment, came from Hans's work.
+
+Thank you, Hans. 🙏 If you're reading this: your project did more than
+share code — it showed a fellow builder that the goal was within reach.
+
+(The reference files kept under `gateware/_ref/` remain Hans Baier's
+work, CERN-OHL-W-2.0; see `NOTICE`.)
+
+---
+
 ## Related repos
 
+- **adat-usb2-audio-interface** (the inspiration) —
+  https://github.com/hansfbaier/adat-usb2-audio-interface
 - **avb-aes3** — https://github.com/Nickster90s/avb-aes3
   The LiteX SoC that instances this project's USB block + handles
   AVB-Milan / gPTP / AVDECC / AAF / CRF / MCR. Its `TOOLCHAIN.md`
@@ -411,4 +443,8 @@ gotcha in section 1.
 
 ## License
 
-See `LICENSE`, `NOTICE`, and `LICENSING.md`. Short version: Apache 2.0 for our original code; `rtl/ulpi_ultraembedded/ulpi_wrapper.v` is GPL (upstream); `gateware/usb_descriptors.py` and `gateware/_ref/*` are CERN-OHL-W-2.0 (upstream).
+See `LICENSE`, `NOTICE`, and `LICENSING.md`. Short version: Apache 2.0
+for our original code (now including `gateware/usb_descriptors.py`,
+rewritten from scratch); `rtl/ulpi_ultraembedded/ulpi_wrapper.v` is GPL
+(upstream ultraembedded); the reference copies under `gateware/_ref/`
+remain CERN-OHL-W-2.0 (upstream, Hans Baier — see Acknowledgements).
