@@ -9,3 +9,4 @@ build/
 # Editor files
 .vscode/
 *.swp
+build_fifotest/
