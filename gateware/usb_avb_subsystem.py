@@ -253,10 +253,21 @@ class USBAVBSubsystem(Elaboratable):
             bridge_fifo.r_en    .eq(self.sample_pop & bridge_fifo.r_rdy),
         ]
 
-        # EP1 IN async feedback ← media-clock rate (self.feedback_value).
-        # TODO(P3.4): write feedback_value into ep1_in's memory in the HS
-        # 10.14 format. Nominal 48k = 6.0 samples/uframe = 0x0001_8000.
-        # Wired live from MCR once integrated in avb-aes3.
+        # EP1 IN async feedback (P3.4): transmit the 4-byte HS feedback value
+        # the fabric supplies in self.feedback_value — Q16.16 samples per
+        # microframe, nominal 48k = 6.0 = 0x0006_0000 (NOT 0x18000; that was a
+        # 10.14 mistake). USB sends it little-endian, so byte[address] is the
+        # address-th 8-bit slice. Register into the usb domain (the value
+        # tracks the slow MCR servo rate, so an occasional torn sample is
+        # averaged out by the host's own feedback filter). bytes_in_frame=4
+        # arms the endpoint (default 0 = silent stub → host free-runs → FIFO
+        # overflow, which is the bug this fixes).
+        fb_reg = Signal(32)
+        m.d.usb += fb_reg.eq(self.feedback_value)
+        m.d.comb += [
+            ep1_in.bytes_in_frame.eq(4),
+            ep1_in.value.eq(fb_reg.word_select(ep1_in.address, 8)),
+        ]
 
         m.d.comb += usb.connect.eq(1)
         return m
