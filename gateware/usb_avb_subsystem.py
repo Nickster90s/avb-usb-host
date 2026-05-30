@@ -21,8 +21,11 @@
 
 import os
 from amaranth import (Module, Signal, Elaboratable, Instance, ClockSignal,
-                      ResetSignal, ClockDomain, Cat, Const)
+                      ResetSignal, ClockDomain, Cat, Const, DomainRenamer,
+                      signed)
 from amaranth.lib.fifo import AsyncFIFO
+from amaranth.lib.cdc  import FFSynchronizer
+from amlib.utils       import EdgeToPulse
 
 from luna.gateware.usb.usb2.device   import USBDevice
 from luna.gateware.interface.utmi    import UTMIInterface
@@ -70,7 +73,12 @@ class USBAVBSubsystem(Elaboratable):
         self.sample_overflow_count  = Signal(32)    # OUT (sys): drops at FIFO full
 
         # --- async feedback in (fabric→device) ---
-        self.feedback_value         = Signal(32)    # input, 10.14 samples/uframe
+        # USB async-feedback inputs (sys domain). The feedback value is now
+        # MEASURED + computed inside this wrapper, SOF-synchronised (ADAT/LUNA
+        # canonical topology) — see elaborate(). The fabric just supplies the
+        # media-clock tick and the consumer-FIFO level.
+        self.sample_strobe          = Signal()       # input: MCR fs strobe (media clock)
+        self.block_level            = Signal(8)       # input: consumer FIFO occupancy (0..depth)
 
         if standalone:
             # ULPI + clock become module ports.
@@ -91,7 +99,7 @@ class USBAVBSubsystem(Elaboratable):
             self.ulpi_data_o, self.ulpi_data_oe, self.ulpi_stp_o, self.ulpi_rst_o,
             self.sample_lo, self.sample_hi, self.sample_readable, self.sample_pop,
             self.sample_overflow_count,
-            self.feedback_value,
+            self.sample_strobe, self.block_level,
         ]
 
     def elaborate(self, platform):
@@ -253,20 +261,54 @@ class USBAVBSubsystem(Elaboratable):
             bridge_fifo.r_en    .eq(self.sample_pop & bridge_fifo.r_rdy),
         ]
 
-        # EP1 IN async feedback (P3.4): transmit the 4-byte HS feedback value
-        # the fabric supplies in self.feedback_value — Q16.16 samples per
-        # microframe, nominal 48k = 6.0 = 0x0006_0000 (NOT 0x18000; that was a
-        # 10.14 mistake). USB sends it little-endian, so byte[address] is the
-        # address-th 8-bit slice. Register into the usb domain (the value
-        # tracks the slow MCR servo rate, so an occasional torn sample is
-        # averaged out by the host's own feedback filter). bytes_in_frame=4
-        # arms the endpoint (default 0 = silent stub → host free-runs → FIFO
-        # overflow, which is the bug this fixes).
-        fb_reg = Signal(32)
-        m.d.usb += fb_reg.eq(self.feedback_value)
+        # EP1 IN async feedback (P3.4) — SOF-synchronised rate measurement +
+        # gentle FIFO centering, the ADAT/LUNA canonical topology. Computed
+        # HERE in the usb domain (where usb.sof_detected lives) and updated
+        # ONCE per 256 microframes (~32 ms) so it does not fight the host's own
+        # feedback servo. A per-sys-cycle value (the earlier attempt) hunted /
+        # pinned the FIFO; this is the stable design.
+        #
+        #   value = (Σ media-clock ticks over 256 µframes) << 8  +  trim
+        # Counting the 1×fs strobe over 256 µframes gives ~1536; <<8 scales it
+        # to Q16.16 samples/µframe (nominal 48k → 0x0006_0000). The trim is a
+        # gentle proportional pull toward FIFO mid-depth: err=(centre-level),
+        # err<<4 → ±0.0078 smp/µframe at ±half-depth (~62 frames/s of draining
+        # authority), enough to walk a startup-full FIFO down to centre in
+        # ~0.5 s yet small per 32 ms step → no overshoot. At centre trim→0 and
+        # the value is the pure measured media-clock rate.
+        DEPTH  = 64                      # block FIFO depth (aaf_packetizer)
+        CENTRE = DEPTH // 2
+
+        # Bring the sys-domain media-clock strobe + FIFO level into cd_usb.
+        strobe_usb = Signal()
+        m.submodules.fb_strobe_sync = FFSynchronizer(self.sample_strobe, strobe_usb, o_domain="usb")
+        m.submodules.fb_strobe_edge = fb_strobe_edge = DomainRenamer("usb")(EdgeToPulse())
+        strobe_tick = Signal()
+        m.d.usb  += fb_strobe_edge.edge_in.eq(strobe_usb)
+        m.d.comb += strobe_tick.eq(fb_strobe_edge.pulse_out)
+
+        level_usb = Signal(8)
+        m.submodules.fb_level_sync = FFSynchronizer(self.block_level, level_usb, o_domain="usb")
+
+        clock_counter = Signal(20)
+        sof_counter   = Signal(8)
+        fb_value      = Signal(32, reset=0x0006_0000)
+        err           = Signal(signed(9))
+        m.d.comb += err.eq(CENTRE - level_usb)
+
+        with m.If(strobe_tick):
+            m.d.usb += clock_counter.eq(clock_counter + 1)
+        with m.If(usb.sof_detected):
+            m.d.usb += sof_counter.eq(sof_counter + 1)
+            with m.If(sof_counter == 0):          # every 256 µframes
+                m.d.usb += [
+                    fb_value.eq((clock_counter << 8) + (err << 4)),
+                    clock_counter.eq(strobe_tick),  # keep a tick coincident with the reset
+                ]
+
         m.d.comb += [
             ep1_in.bytes_in_frame.eq(4),
-            ep1_in.value.eq(fb_reg.word_select(ep1_in.address, 8)),
+            ep1_in.value.eq(0xff & (fb_value >> (ep1_in.address << 3))),
         ]
 
         m.d.comb += usb.connect.eq(1)
