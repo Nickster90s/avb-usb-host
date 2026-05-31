@@ -284,7 +284,7 @@ class USBAVBSubsystem(Elaboratable):
         # full (≈ centre − 8.2·over_delivery/64) with burst headroom; gentle
         # enough per 32 ms step to avoid slamming empty (proportional control
         # self-tracks whether the host is over- or under-delivering).
-        DEPTH  = 64                      # block FIFO depth (aaf_packetizer)
+        DEPTH  = 128                     # SRC ring depth (aaf_packetizer fifo_depth)
         CENTRE = DEPTH // 2
 
         # Bring the sys-domain media-clock strobe + FIFO level into cd_usb.
@@ -314,22 +314,24 @@ class USBAVBSubsystem(Elaboratable):
         # to a tight band well inside the host's accept window so none is ever
         # rejected; (3) light 1-tap IIR to shed the ±1-count measurement jitter.
         NOMINAL = 0x0006_0000
-        FB_LO   = NOMINAL - 0x4000        # 0x5C000  (host rejects < 0x54000)
-        FB_HI   = NOMINAL + 0x4000        # 0x64000
+        # Linux accepts [freqn-freqn/8, freqmax] = [0x54000, 0x90000]; widen our
+        # clamp to ±0x8000 (±3.4%) so the centring trim has the authority to beat
+        # the host's ~2% delivery lead (the old ±0x4000=±1.7% couldn't drain it).
+        FB_LO   = NOMINAL - 0x8000        # 0x58000  (well above Linux's 0x54000 floor)
+        FB_HI   = NOMINAL + 0x8000        # 0x68000
         fb_new   = Signal(signed(34))
         fb_clamp = Signal(32)
-        # CONSTANT nominal feedback. The host HONOURS this value (it follows it
-        # closely — proven: when fb reported the NCO strobe rate the host tracked
-        # it to 48000×65/64). That coupling is fatal here: the firmware NCO servo
-        # (mcr_usb_lock) ALSO chases the block FIFO, so "fb = NCO rate" + "NCO
-        # servo speeds up when FIFO full" is positive feedback → both ramp to the
-        # servo clamp (48750) and the FIFO pins full. Decouple: report a fixed
-        # 0x60000 so the host runs at a steady ~48 kHz, and let the single NCO
-        # servo do the centring — it can now actually drain the FIFO because the
-        # host no longer follows the NCO. (Host-vs-NCO offset is then ppm-level,
-        # trivially inside the servo's authority.)  err/clock_counter kept for
-        # the diagnostic path but no longer drive the reported value.
-        m.d.comb += fb_new.eq(NOMINAL)
+        # HONEST MEASURED feedback + gentle FIFO-centring trim (smunaut model —
+        # his status reg exposes f_lvl for exactly this). clock_counter<<8 = our
+        # free-running NCO rate measured vs the host SOF (Q16.16 samples/µframe).
+        # (err<<6) nudges the host ±~1% to pull the ring to CENTRE: err = CENTRE -
+        # level, so a full ring → negative → lower feedback → host delivers less →
+        # ring drains. NO firmware NCO/FIFO servo, so this can't run away (the
+        # only loop is the gentle host-paced centring, and the NCO is stable).
+        # Held, averaged NCO rate (strobes per 256-SOF window). Reset 1536 =
+        # 48k nominal so the value is sane before the first window completes.
+        nco_rate = Signal(20, reset=1536)
+        m.d.comb += fb_new.eq((nco_rate << 8) + (err << 6))
         with m.If(fb_new < FB_LO):
             m.d.comb += fb_clamp.eq(FB_LO)
         with m.Elif(fb_new > FB_HI):
@@ -341,11 +343,15 @@ class USBAVBSubsystem(Elaboratable):
             m.d.usb += clock_counter.eq(clock_counter + 1)
         with m.If(usb.sof_detected):
             m.d.usb += sof_counter.eq(sof_counter + 1)
-            with m.If(sof_counter == 0):          # every 256 µframes
-                m.d.usb += [
-                    fb_value.eq((fb_value + fb_clamp) >> 1),  # IIR smooth + clamp
-                    clock_counter.eq(strobe_tick),  # keep a tick coincident with the reset
-                ]
+            # Every 256 SOFs: latch the averaged NCO rate (accurate base), reset.
+            with m.If(sof_counter == 0):
+                m.d.usb += [nco_rate.eq(clock_counter), clock_counter.eq(strobe_tick)]
+            # Every 8 SOFs (~1 ms = host feedback poll period): refresh the
+            # reported value with the held NCO rate + the CURRENT centring trim.
+            # Fast err response (low loop lag) → stable centring; the old 32 ms
+            # update made the centring loop underdamped and it oscillated full.
+            with m.If(sof_counter[0:3] == 0):
+                m.d.usb += fb_value.eq(fb_clamp)
 
         m.d.comb += [
             ep1_in.bytes_in_frame.eq(4),
