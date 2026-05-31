@@ -304,13 +304,35 @@ class USBAVBSubsystem(Elaboratable):
         err           = Signal(signed(9))
         m.d.comb += err.eq(CENTRE - level_usb)
 
+        # CLAMP + SMOOTH the feedback value (the actual fix per the Linux
+        # snd-usb-audio source, sound/usb/endpoint.c): the host detects the
+        # Q-format from the FIRST value (→ freqshift) and then REJECTS any later
+        # value outside [freqn − freqn/8, freqmax], silently holding the last
+        # good one. A jittery / out-of-range value therefore strands the host at
+        # a stale (higher) rate → it over-delivers. So: (1) the reset value is
+        # exactly nominal 0x60000 → freqshift locks to 0; (2) clamp every value
+        # to a tight band well inside the host's accept window so none is ever
+        # rejected; (3) light 1-tap IIR to shed the ±1-count measurement jitter.
+        NOMINAL = 0x0006_0000
+        FB_LO   = NOMINAL - 0x4000        # 0x5C000  (host rejects < 0x54000)
+        FB_HI   = NOMINAL + 0x4000        # 0x64000
+        fb_new   = Signal(signed(34))
+        fb_clamp = Signal(32)
+        m.d.comb += fb_new.eq((clock_counter << 8) + (err << 6))
+        with m.If(fb_new < FB_LO):
+            m.d.comb += fb_clamp.eq(FB_LO)
+        with m.Elif(fb_new > FB_HI):
+            m.d.comb += fb_clamp.eq(FB_HI)
+        with m.Else():
+            m.d.comb += fb_clamp.eq(fb_new)
+
         with m.If(strobe_tick):
             m.d.usb += clock_counter.eq(clock_counter + 1)
         with m.If(usb.sof_detected):
             m.d.usb += sof_counter.eq(sof_counter + 1)
             with m.If(sof_counter == 0):          # every 256 µframes
                 m.d.usb += [
-                    fb_value.eq((clock_counter << 8) + (err << 6)),
+                    fb_value.eq((fb_value + fb_clamp) >> 1),  # IIR smooth + clamp
                     clock_counter.eq(strobe_tick),  # keep a tick coincident with the reset
                 ]
 
