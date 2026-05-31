@@ -318,7 +318,18 @@ class USBAVBSubsystem(Elaboratable):
         FB_HI   = NOMINAL + 0x4000        # 0x64000
         fb_new   = Signal(signed(34))
         fb_clamp = Signal(32)
-        m.d.comb += fb_new.eq((clock_counter << 8) + (err << 6))
+        # CONSTANT nominal feedback. The host HONOURS this value (it follows it
+        # closely — proven: when fb reported the NCO strobe rate the host tracked
+        # it to 48000×65/64). That coupling is fatal here: the firmware NCO servo
+        # (mcr_usb_lock) ALSO chases the block FIFO, so "fb = NCO rate" + "NCO
+        # servo speeds up when FIFO full" is positive feedback → both ramp to the
+        # servo clamp (48750) and the FIFO pins full. Decouple: report a fixed
+        # 0x60000 so the host runs at a steady ~48 kHz, and let the single NCO
+        # servo do the centring — it can now actually drain the FIFO because the
+        # host no longer follows the NCO. (Host-vs-NCO offset is then ppm-level,
+        # trivially inside the servo's authority.)  err/clock_counter kept for
+        # the diagnostic path but no longer drive the reported value.
+        m.d.comb += fb_new.eq(NOMINAL)
         with m.If(fb_new < FB_LO):
             m.d.comb += fb_clamp.eq(FB_LO)
         with m.Elif(fb_new > FB_HI):
