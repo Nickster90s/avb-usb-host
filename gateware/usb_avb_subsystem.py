@@ -271,11 +271,19 @@ class USBAVBSubsystem(Elaboratable):
         #   value = (Σ media-clock ticks over 256 µframes) << 8  +  trim
         # Counting the 1×fs strobe over 256 µframes gives ~1536; <<8 scales it
         # to Q16.16 samples/µframe (nominal 48k → 0x0006_0000). The trim is a
-        # gentle proportional pull toward FIFO mid-depth: err=(centre-level),
-        # err<<4 → ±0.0078 smp/µframe at ±half-depth (~62 frames/s of draining
-        # authority), enough to walk a startup-full FIFO down to centre in
-        # ~0.5 s yet small per 32 ms step → no overshoot. At centre trim→0 and
-        # the value is the pure measured media-clock rate.
+        # proportional pull toward FIFO mid-depth: err=(centre-level), gain
+        # <<6 → ~250 frames/s of throttle authority at ±half-depth.
+        #
+        # Soft-ILA capture (2026-05-31) showed the measured base perfectly
+        # rate-locks the host to consumption, but the host still OVER-delivers
+        # ~100 frames/s, which saturates both FIFOs (the block-FIFO push/pop
+        # counters stall-lock to the strobe rate so they hid it; the bridge
+        # overflow is the true excess). The trim must therefore command a real
+        # DEFICIT when the FIFO is high so the host is pulled below consumption
+        # and the buffers gain headroom. <<6 settles at a stable level below
+        # full (≈ centre − 8.2·over_delivery/64) with burst headroom; gentle
+        # enough per 32 ms step to avoid slamming empty (proportional control
+        # self-tracks whether the host is over- or under-delivering).
         DEPTH  = 64                      # block FIFO depth (aaf_packetizer)
         CENTRE = DEPTH // 2
 
@@ -302,7 +310,7 @@ class USBAVBSubsystem(Elaboratable):
             m.d.usb += sof_counter.eq(sof_counter + 1)
             with m.If(sof_counter == 0):          # every 256 µframes
                 m.d.usb += [
-                    fb_value.eq((clock_counter << 8) + (err << 4)),
+                    fb_value.eq((clock_counter << 8) + (err << 6)),
                     clock_counter.eq(strobe_tick),  # keep a tick coincident with the reset
                 ]
 
