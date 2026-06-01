@@ -229,3 +229,48 @@ if __name__ == "__main__":
     test_ep_decoder_continuous(40, 48, 80, 2)
     print("\n=== Test 4: FULL ingress + cd_usb->sys bridge + sys do_pop counters ===")
     test_full_bridge(40, 48, 80, 2)
+
+
+def test_first_cadence(n_frames=24, n_ch=2, firsts_per_packet=1, pkt_frames=6):
+    """Measure cs.first cadence for 2ch with usb_first asserted `firsts_per_packet`
+    times per `pkt_frames`-frame packet. Correct: cs.first == n_frames (1/frame).
+    If the real EP asserts stream.first multiple times per packet, each forces
+    out_channel_nr=0 -> extra firsts -> first > n_frames (on-HW: 1.5x)."""
+    m = Module()
+    m.submodules.dec = dec = USBStreamToChannels(max_no_channels=8)
+    m.d.comb += [dec.no_channels_in.eq(n_ch), dec.channel_stream_out.ready.eq(1)]
+    nbytes = n_frames * n_ch * 4
+    res = {"valid":0, "first":0}
+    def bench():
+        yield dec.usb_stream_in.valid.eq(0); yield
+        byte_i = 0
+        for f in range(n_frames):
+            for c in range(n_ch):
+                for b in range(4):
+                    # assert usb_first on the very first byte of the packet, and
+                    # (to model EP chunking) `firsts_per_packet` evenly within it
+                    in_pkt = f % pkt_frames
+                    first = 1 if (b==0 and c==0 and (in_pkt * firsts_per_packet // pkt_frames) !=
+                                  ((in_pkt-1) * firsts_per_packet // pkt_frames) ) else 0
+                    if f % pkt_frames == 0 and b==0 and c==0:
+                        first = 1
+                    yield dec.usb_stream_in.valid.eq(1)
+                    yield dec.usb_stream_in.first.eq(first)
+                    yield dec.usb_stream_in.payload.eq(byte_i & 0xff); byte_i += 1
+                    yield
+                    if (yield dec.channel_stream_out.valid): res["valid"] += 1
+                    if (yield dec.channel_stream_out.first): res["first"] += 1
+        yield dec.usb_stream_in.valid.eq(0)
+        for _ in range(20):
+            yield
+            if (yield dec.channel_stream_out.valid): res["valid"] += 1
+            if (yield dec.channel_stream_out.first): res["first"] += 1
+    sim = Simulator(m); sim.add_clock(1/60e6); sim.add_sync_process(bench); sim.run()
+    print(f"[FIRST] {n_frames} frames x{n_ch}ch, firsts/pkt={firsts_per_packet}: "
+          f"cs.valid={res['valid']} (exp {n_frames*n_ch}), cs.first={res['first']} (exp {n_frames})")
+
+if __name__ == "__main__":
+    print("\n=== Test 5: cs.first cadence vs usb_first frequency ===")
+    test_first_cadence(24, 2, 1)
+    test_first_cadence(24, 2, 2)
+    test_first_cadence(24, 2, 3)
