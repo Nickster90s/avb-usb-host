@@ -79,6 +79,7 @@ class USBAVBSubsystem(Elaboratable):
         # media-clock tick and the consumer-FIFO level.
         self.sample_strobe          = Signal()       # input: MCR fs strobe (media clock)
         self.block_level            = Signal(8)       # input: consumer FIFO occupancy (0..depth)
+        self.fb_ovr                 = Signal(32)      # input: firmware feedback OVERRIDE (0=auto)
 
         if standalone:
             # ULPI + clock become module ports.
@@ -99,7 +100,7 @@ class USBAVBSubsystem(Elaboratable):
             self.ulpi_data_o, self.ulpi_data_oe, self.ulpi_stp_o, self.ulpi_rst_o,
             self.sample_lo, self.sample_hi, self.sample_readable, self.sample_pop,
             self.sample_overflow_count,
-            self.sample_strobe, self.block_level,
+            self.sample_strobe, self.block_level, self.fb_ovr,
         ]
 
     def elaborate(self, platform):
@@ -353,9 +354,21 @@ class USBAVBSubsystem(Elaboratable):
             with m.If(sof_counter[0:3] == 0):
                 m.d.usb += fb_value.eq(fb_clamp)
 
+        # Firmware feedback OVERRIDE: when usb_fb_ovr != 0, report that fixed
+        # value instead of the measured/centring loop — lets firmware sweep
+        # hardcoded feedback values live (no rebuild) to characterise the host's
+        # response. 0 = normal auto loop.
+        fb_ovr_usb = Signal(32)
+        m.submodules.fb_ovr_sync = FFSynchronizer(self.fb_ovr, fb_ovr_usb, o_domain="usb")
+        fb_out = Signal(32)
+        with m.If(fb_ovr_usb != 0):
+            m.d.comb += fb_out.eq(fb_ovr_usb)
+        with m.Else():
+            m.d.comb += fb_out.eq(fb_value)
+
         m.d.comb += [
             ep1_in.bytes_in_frame.eq(4),
-            ep1_in.value.eq(0xff & (fb_value >> (ep1_in.address << 3))),
+            ep1_in.value.eq(0xff & (fb_out >> (ep1_in.address << 3))),
         ]
 
         m.d.comb += usb.connect.eq(1)
