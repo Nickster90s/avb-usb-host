@@ -262,11 +262,30 @@ class USBAVBSubsystem(Elaboratable):
         # int32 with zero further shifting. When USBStreamToChannels is
         # later upgraded to payload_width=32, the same wiring still works
         # (just no zero-pad LSBs).
+        # DETERMINISTIC framing: re-derive channel + first from a free-running
+        # modulo-N counter on cs.valid, IGNORING the decoder's cs.channel_nr/
+        # cs.first. The decoder's first marking is unreliable on the real stream
+        # (on-HW 64% even with usb_first=0 — residual desync/drops), which
+        # over-pressures the SRC ring (push attempts > consumption -> never
+        # centres). Counting emitted samples mod N gives EXACTLY one first per
+        # frame (50% for 2ch) no matter what the decoder marks. N = the active
+        # channel count (matches no_channels_in). The sample DATA (cs.payload) is
+        # used in emission order; phase may be offset by the decoder's start
+        # (cosmetic channel rotation), fixable with a one-shot start resync later.
+        N_ACTIVE = 2
+        fr_ch = Signal(range(self.NUMBER_OF_CHANNELS))
+        with m.If(cs.valid):
+            with m.If(fr_ch == N_ACTIVE - 1):
+                m.d.usb += fr_ch.eq(0)
+            with m.Else():
+                m.d.usb += fr_ch.eq(fr_ch + 1)
+        fr_first = Signal()
+        m.d.comb += fr_first.eq(fr_ch == 0)
         w_word = Cat(
             Const(0, 8),         # bits  0..7  : zero pad
             cs.payload[:24],     # bits  8..31 : 24-bit audio, MSB-aligned
-            cs.channel_nr,       # bits 32..34
-            cs.first,            # bit  35
+            fr_ch,               # bits 32..34 : channel (free-running mod N)
+            fr_first,            # bit  35     : first (1 per N samples)
             Const(0, 28),        # bits 36..63
         )
 
