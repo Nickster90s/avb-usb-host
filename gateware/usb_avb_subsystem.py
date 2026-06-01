@@ -198,6 +198,13 @@ class USBAVBSubsystem(Elaboratable):
         m.submodules.out2ch = out2ch = USBStreamToChannels(
             max_no_channels=self.NUMBER_OF_CHANNELS)
         m.d.comb += out2ch.usb_stream_in.stream_eq(ep1_out.stream)
+        # CRITICAL: drive no_channels_in or the decoder mis-frames and FLOODS the
+        # bridge (last_channel = no_channels_in-1 = -1 if undriven -> the channel
+        # counter never wraps cleanly -> cs.first fires on the wrong cadence ->
+        # ~14x too many frames, ring pins full). Set to the host's ACTIVE channel
+        # count. Today the host streams 2ch (the 8ch altset won't enumerate, see
+        # the UAC2 8ch-terminal descriptor TODO); set 8 here once that's fixed.
+        m.d.comb += out2ch.no_channels_in.eq(2)
 
         cs = out2ch.channel_stream_out
 
