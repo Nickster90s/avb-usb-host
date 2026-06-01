@@ -71,6 +71,9 @@ class USBAVBSubsystem(Elaboratable):
         self.sample_readable        = Signal()      # OUT (sys): FIFO has data
         self.sample_pop             = Signal()      # IN  (sys): advance read ptr
         self.sample_overflow_count  = Signal(32)    # OUT (sys): drops at FIFO full
+        # --- localisation diagnostics (sys-synced from cd_usb) ---
+        self.dbg_rx_beats   = Signal(32)   # OUT: core->EP raw byte beats (rx.next & rx.valid)
+        self.dbg_ep_out     = Signal(32)   # OUT: EP->decoder beats (stream.valid & ready)
 
         # --- async feedback in (fabric→device) ---
         # USB async-feedback inputs (sys domain). The feedback value is now
@@ -100,6 +103,7 @@ class USBAVBSubsystem(Elaboratable):
             self.ulpi_data_o, self.ulpi_data_oe, self.ulpi_stp_o, self.ulpi_rst_o,
             self.sample_lo, self.sample_hi, self.sample_readable, self.sample_pop,
             self.sample_overflow_count,
+            self.dbg_rx_beats, self.dbg_ep_out,
             self.sample_strobe, self.block_level, self.fb_ovr,
         ]
 
@@ -260,6 +264,20 @@ class USBAVBSubsystem(Elaboratable):
         overflow_sys = Signal(32)
         m.d.sync += overflow_sys.eq(overflow_usb)
         m.d.comb += self.sample_overflow_count.eq(overflow_sys)
+
+        # Localisation counters (cd_usb): where does the ~25x replay enter?
+        #  rx_beats = raw bytes the USB core/ULPI hands the EP (rx.next & rx.valid)
+        #  ep_out   = bytes the EP emits to the decoder (stream.valid & ready)
+        # If rx_beats >> real 384k B/s -> real RX duplication (ULPI/UTMI/placement).
+        # If rx_beats ~= 384k but ep_out/cs.valid floods -> EP re-presents (stale buf).
+        rx_beats_usb = Signal(32); ep_out_usb = Signal(32)
+        with m.If(ep1_out.interface.rx.next & ep1_out.interface.rx.valid):
+            m.d.usb += rx_beats_usb.eq(rx_beats_usb + 1)
+        with m.If(ep1_out.stream.valid & ep1_out.stream.ready):
+            m.d.usb += ep_out_usb.eq(ep_out_usb + 1)
+        rx_beats_sys = Signal(32); ep_out_sys = Signal(32)
+        m.d.sync += [rx_beats_sys.eq(rx_beats_usb), ep_out_sys.eq(ep_out_usb)]
+        m.d.comb += [self.dbg_rx_beats.eq(rx_beats_sys), self.dbg_ep_out.eq(ep_out_sys)]
 
         # Read side (sys / sync):
         m.d.comb += [
