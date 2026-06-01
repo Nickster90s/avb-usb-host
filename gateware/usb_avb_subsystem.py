@@ -199,8 +199,19 @@ class USBAVBSubsystem(Elaboratable):
             endpoint_number=1, max_packet_size=4)
         usb.add_endpoint(ep1_in)
 
-        m.submodules.out2ch = out2ch = USBStreamToChannels(
-            max_no_channels=self.NUMBER_OF_CHANNELS)
+        # The decoder MUST run in the USB (cd_usb) domain — same as the EP that
+        # feeds it (ep1_out) and the bridge_fifo WRITE side (w_domain="usb").
+        # USBStreamToChannels uses m.d.sync; without this DomainRenamer it lands
+        # in the wrapper's sync(=sys) domain, so ep1_out.stream (usb) -> decoder
+        # (sys) and decoder cs.valid (sys) -> bridge write (usb) are BOTH
+        # unsynchronised crossings. The sys-clocked FSM mis-samples the usb
+        # stream and the bridge re-samples cs.valid -> the decoder over-produces
+        # ~4x (on-HW usb_samp~400k vs real 96k). The Amaranth sim was clean only
+        # because it wrapped the decoder in DomainRenamer("usb"). Match it here so
+        # EP->decoder->bridge-write are one clean cd_usb chain; the AsyncFIFO is
+        # then the ONLY (proper) cd_usb->sys crossing.
+        m.submodules.out2ch = out2ch = DomainRenamer("usb")(
+            USBStreamToChannels(max_no_channels=self.NUMBER_OF_CHANNELS))
         m.d.comb += out2ch.usb_stream_in.stream_eq(ep1_out.stream)
         # CRITICAL: drive no_channels_in or the decoder mis-frames and FLOODS the
         # bridge (last_channel = no_channels_in-1 = -1 if undriven -> the channel
