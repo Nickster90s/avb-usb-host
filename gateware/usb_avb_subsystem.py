@@ -212,7 +212,25 @@ class USBAVBSubsystem(Elaboratable):
         # then the ONLY (proper) cd_usb->sys crossing.
         m.submodules.out2ch = out2ch = DomainRenamer("usb")(
             USBStreamToChannels(max_no_channels=self.NUMBER_OF_CHANNELS))
-        m.d.comb += out2ch.usb_stream_in.stream_eq(ep1_out.stream)
+        # Connect the EP stream to the decoder, but DO NOT pass usb_first. The EP
+        # boundary detector's `first` (USB packet/transaction start) is NOT
+        # 4-byte/sample-aligned on the real host stream, so USBStreamToChannels'
+        # usb_first resync fires mid-sample and truncates frames -> cs.first lands
+        # on ~75% of samples instead of 50% for 2ch (on-HW first=72k vs 48k),
+        # over-pressuring the SRC ring so it never centres. Tie first=0: the
+        # decoder then FREE-RUNS its channel counter (it already wraps at
+        # last_channel = no_channels_in-1), giving clean 1-first-per-frame framing.
+        # Safe here: the EP path is drop-free (usb_samp is exactly 96k, sim-proven)
+        # so the free-running count stays aligned. NOTE: free-run starts the count
+        # one sample early (channels emit 1,0,1,0.. for 2ch) — a cosmetic phase
+        # offset (L/R swap); a one-shot start-of-stream resync can fix the phase
+        # later if needed. usb_last is unused by the decoder.
+        m.d.comb += [
+            out2ch.usb_stream_in.valid.eq(ep1_out.stream.valid),
+            out2ch.usb_stream_in.payload.eq(ep1_out.stream.payload),
+            out2ch.usb_stream_in.first.eq(0),     # free-run channels; no packet resync
+            ep1_out.stream.ready.eq(out2ch.usb_stream_in.ready),
+        ]
         # CRITICAL: drive no_channels_in or the decoder mis-frames and FLOODS the
         # bridge (last_channel = no_channels_in-1 = -1 if undriven -> the channel
         # counter never wraps cleanly -> cs.first fires on the wrong cadence ->
