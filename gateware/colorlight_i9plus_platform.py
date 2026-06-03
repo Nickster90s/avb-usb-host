@@ -155,6 +155,15 @@ class ColorlightI9PlusPlatform(XilinxPlatform):
                       Attrs(IOB="TRUE")),
             Attrs(IOSTANDARD="LVCMOS33", SLEW="FAST")),
 
+        # ----- I2S DAC (PCM5102A) — same balls as avb-aes3 i2s_io() -----
+        # SODIMM 46/48/50 → balls U7/U6/U5. DAC board: SCK=GND (no-MCLK,
+        # internal PLL), FMT=I2S, XSMT=unmute.
+        Resource("i2s_dac", 0,
+            Subsignal("bck",  Pins("U7", dir="o")),
+            Subsignal("lrck", Pins("U6", dir="o")),
+            Subsignal("din",  Pins("U5", dir="o")),
+            Attrs(IOSTANDARD="LVCMOS33")),
+
         # The AVB-side Ethernet PHYs (PHY0 + PHY1) will be added in Phase 3
         # when we bring over the LiteEth + AVB stack from avb-aes3.
     ]

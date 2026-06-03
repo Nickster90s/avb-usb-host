@@ -8,7 +8,7 @@
 # Once this enumerates on the host and round-trips audio cleanly, we
 # integrate with the AVB stack in Phase 3.
 
-from amaranth import Module, Signal, Elaboratable, Shape, Mux
+from amaranth import Module, Signal, Elaboratable, Shape, Mux, ClockSignal
 
 from luna                                 import top_level_cli
 from luna.gateware.usb.usb2.device        import USBDevice
@@ -23,6 +23,8 @@ from usb_descriptors                      import USBDescriptors
 from requesthandlers                      import UAC2RequestHandlers
 from usb_stream_to_channels               import USBStreamToChannels
 from channels_to_usb_stream               import ChannelsToUSBStream
+from stereopair_extractor                 import StereoPairExtractor
+from amlib.io.i2s                         import I2STransmitter
 
 
 class USBLoopback(Elaboratable):
@@ -100,6 +102,44 @@ class USBLoopback(Elaboratable):
         m.d.comb += [
             ch2in.channel_stream_in.stream_eq(out2ch.channel_stream_out),
             ep2_in.stream.stream_eq(ch2in.usb_stream_out),
+        ]
+
+        # ---- Local I2S DAC monitor (ADAT-style: amlib I2STransmitter) ----
+        # Tap the decoder's channel stream in PARALLEL with the loopback (the
+        # StereoPairExtractor does not back-pressure), pull ch0/ch1, serialise to
+        # the PCM5102A. BCK/LRCK are pure integer divides of the clean cd_audio
+        # clock (the no-MCLK DAC needs a clean BCK). Clocks + data are inverted to
+        # the pins per ADAT ("in I2S everything happens on the negedge").
+        dac_pads = platform.request("i2s_dac", 0)
+
+        audio_cnt = Signal(8)
+        m.d.audio += audio_cnt.eq(audio_cnt + 1)
+        bck_sig  = Signal()
+        lrck_sig = Signal()
+        m.d.comb += [
+            bck_sig .eq(audio_cnt[1]),   # cd_audio / 4  = BCK (~3.06 MHz)
+            lrck_sig.eq(audio_cnt[7]),   # cd_audio / 256 = LRCK (~47.8 kHz)
+        ]
+
+        m.submodules.dac_ext = dac_ext = StereoPairExtractor(
+            self.NUMBER_OF_CHANNELS, fifo_depth=16)
+        m.submodules.dac_tx  = dac_tx  = I2STransmitter(
+            sample_width=self.AUDIO_BITS, fifo_depth=16)
+        m.d.comb += [
+            dac_ext.selected_channel_in.eq(0),                  # ch0 (L) + ch1 (R)
+            dac_ext.channel_stream_in.valid.eq(
+                out2ch.channel_stream_out.valid & out2ch.channel_stream_out.ready),
+            dac_ext.channel_stream_in.payload.eq(out2ch.channel_stream_out.payload),
+            dac_ext.channel_stream_in.channel_nr.eq(out2ch.channel_stream_out.channel_nr),
+
+            dac_tx.stream_in.stream_eq(dac_ext.channel_stream_out),
+            dac_tx.enable_in.eq(1),
+            dac_tx.serial_clock_in.eq(~bck_sig),                # ADAT: negedge
+            dac_tx.word_select_in .eq(~lrck_sig),
+
+            dac_pads.bck .o.eq(~bck_sig),
+            dac_pads.lrck.o.eq(~lrck_sig),
+            dac_pads.din .o.eq(dac_tx.serial_data_out),
         ]
 
         # Connect — tell USB host we're ready.

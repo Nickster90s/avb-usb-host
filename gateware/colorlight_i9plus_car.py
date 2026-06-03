@@ -50,10 +50,11 @@ class ColorlightI9PlusCAR(Elaboratable):
     def elaborate(self, platform):
         m = Module()
 
-        cd_sync = ClockDomain("sync")
-        cd_usb  = ClockDomain("usb")
-        cd_fast = ClockDomain("fast")
-        m.domains += [cd_sync, cd_usb, cd_fast]
+        cd_sync  = ClockDomain("sync")
+        cd_usb   = ClockDomain("usb")
+        cd_fast  = ClockDomain("fast")
+        cd_audio = ClockDomain("audio")          # ~12.288 MHz for the I2S DAC
+        m.domains += [cd_sync, cd_usb, cd_fast, cd_audio]
 
         clk25 = platform.request(platform.default_clk, 0)
 
@@ -64,6 +65,7 @@ class ColorlightI9PlusCAR(Elaboratable):
         mainpll_feedback = Signal()
         sys_clk          = Signal()
         fast_clk         = Signal()
+        audio_clk        = Signal()
         sys_locked       = Signal()
 
         m.submodules.mainpll = Instance("PLLE2_ADV",
@@ -90,11 +92,20 @@ class ColorlightI9PlusCAR(Elaboratable):
             p_CLKOUT1_PHASE   = 0.0,
             p_CLKOUT1_DUTY_CYCLE = 0.5,
 
+            # 1200 / 98 = 12.245 MHz ≈ 256 × 47.8 kHz — the I2S DAC clock. Slight
+            # (0.35%) offset from 12.288 MHz is fine for a monitor: BCK = /4,
+            # LRCK = /256 are derived as pure integer divides → clean, exactly
+            # 32 BCK/channel (the DAC needs a clean BCK, not exact fs).
+            p_CLKOUT2_DIVIDE  = 98,
+            p_CLKOUT2_PHASE   = 0.0,
+            p_CLKOUT2_DUTY_CYCLE = 0.5,
+
             i_CLKIN1   = clk25.i,
             i_CLKFBIN  = mainpll_feedback,
             o_CLKFBOUT = mainpll_feedback,
             o_CLKOUT0  = sys_clk,
             o_CLKOUT1  = fast_clk,
+            o_CLKOUT2  = audio_clk,
             o_LOCKED   = sys_locked,
         )
 
@@ -113,6 +124,7 @@ class ColorlightI9PlusCAR(Elaboratable):
         m.d.comb += [
             cd_sync.clk.eq(sys_clk),
             cd_fast.clk.eq(fast_clk),
+            cd_audio.clk.eq(audio_clk),
         ]
 
         if self.usb_pll:
