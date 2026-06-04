@@ -17,7 +17,7 @@
 
 import os
 from amaranth import (Module, Signal, Elaboratable, Instance, ClockSignal,
-                      ResetSignal, ClockDomain, Array, C, Cat, signed, DomainRenamer)
+                      ResetSignal, ClockDomain, Array, C, Cat, Mux, signed, DomainRenamer)
 from amaranth.lib.cdc import FFSynchronizer
 from amaranth.lib.fifo import AsyncFIFO
 from amlib.utils import EdgeToPulse
@@ -170,7 +170,8 @@ class USBLoopbackUTMI(Elaboratable):
             lambda setup: (setup.type    == USBRequestType.STANDARD)
                         & (setup.request == USBStandardRequests.SET_INTERFACE)
         ])
-        control_ep.add_request_handler(UAC2RequestHandlers())
+        uac2_handler = UAC2RequestHandlers()
+        control_ep.add_request_handler(uac2_handler)
 
         ep1_out = USBIsochronousOutStreamEndpoint(
             endpoint_number=1, max_packet_size=self.MAX_PACKET_SIZE)
@@ -188,13 +189,18 @@ class USBLoopbackUTMI(Elaboratable):
         # DAC path placement-fragile (intermittent no-audio / bleed / glitches).
         m.submodules.out2ch = out2ch = DomainRenamer("usb")(USBStreamToChannels(
             max_no_channels=self.NUMBER_OF_CHANNELS))
+        # CRITICAL: no_channels_in MUST match the host's ACTIVE output altset, or
+        # the decoder mis-frames. Linux/aplay picks altset 1 (2ch); macOS picks
+        # altset 2 (the 8ch native format) and streams 8 channels. Hardcoding 2
+        # made macOS's 8ch stream frame as 2ch -> ~4x frame rate -> FIFO flood ->
+        # servo slams feedback to floor -> macOS iso scheduling overloads
+        # (kIOReturnIsoTooNew) and stops the engine after ~2 s. Track the altset:
+        # altset 1 -> 2 ch, altset 2 -> NUMBER_OF_CHANNELS (8). The DAC extractor
+        # pulls ch0/ch1 either way, so stereo monitoring works for both.
+        out_alt = uac2_handler.output_interface_altsetting_nr
         m.d.comb += [
             out2ch.usb_stream_in.stream_eq(ep1_out.stream),
-            # CRITICAL: drive no_channels_in to the host's ACTIVE channel count or
-            # the decoder mis-frames (last_channel = no_channels_in-1 = 7 when
-            # undriven → expects 8ch frames). The host streams stereo Altset 1 =
-            # 2ch (FL FR), so frame on 2 → channel_nr 0=L,1=R for the DAC tap.
-            out2ch.no_channels_in.eq(2),
+            out2ch.no_channels_in.eq(Mux(out_alt == 2, self.NUMBER_OF_CHANNELS, 2)),
         ]
 
         m.submodules.ch2in = ch2in = DomainRenamer("usb")(ChannelsToUSBStream(
@@ -343,9 +349,15 @@ class USBLoopbackUTMI(Elaboratable):
         #   corr  = err*KP + integral(KI=1), anti-windup + clamp to ~+-1.5%
         #   fb    = audio_counter + corr
         CENTER    = 32         # target for w_level>>4  (fifo ~512 of 1024)
-        KP        = 256
+        KP        = 128
         INT_CLAMP = 1024
-        CORR_MAX  = 6000       # ~1.5 % of the ~391837 nominal fb
+        # macOS/CoreAudio rejects async feedback that strays too far from nominal
+        # and halts the stream (~2 s) — Linux tolerates it. Keep the correction
+        # SMALL (~0.38 %): base rate is already -0.35 % off nominal, so this keeps
+        # the reported rate within ~-0.7%..+0.03 % of 48 k, inside macOS's window,
+        # while the integral still slowly centres the FIFO. (Was 6000 = 1.5 %,
+        # which slammed to ~-1.85 % at startup -> macOS dropped the stream.)
+        CORR_MAX  = 1500       # ~0.38 % of the ~391837 nominal fb
         level_b = Signal(7)
         err     = Signal(signed(9))
         integ   = Signal(signed(16))

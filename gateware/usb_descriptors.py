@@ -113,7 +113,11 @@ class USBDescriptors():
         clk = uac2.ClockSourceDescriptorEmitter()
         clk.bClockID     = self.CLOCK_ID
         clk.bmAttributes = uac2.ClockAttributes.INTERNAL_FIXED_CLOCK
-        clk.bmControls   = uac2.ClockFrequencyControl.HOST_READ_ONLY
+        # bmControls bitmap: bits[1:0]=freq control, bits[3:2]=validity control.
+        # Advertise BOTH as host-readable: freq read-only (01) + clock-valid
+        # read-only (01<<2) = 0x05. macOS queries CLOCK_VALID and needs it present
+        # + answered (see requesthandlers) or it stops the stream after ~2 s.
+        clk.bmControls   = uac2.ClockFrequencyControl.HOST_READ_ONLY | (0b01 << 2)
         ac.add_subordinate_descriptor(clk)
 
         # Playback: USB-streaming IN terminal → Speaker OUT terminal.

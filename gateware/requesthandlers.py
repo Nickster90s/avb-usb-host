@@ -73,6 +73,13 @@ class UAC2RequestHandlers(USBRequestHandler):
         request_clock_freq     = clock_freq     & setup.is_in_request
         set_clock_freq         = clock_freq     & ~setup.is_in_request
 
+        # macOS/CoreAudio polls the Clock Source's CLOCK_VALID control during
+        # streaming and STOPS the stream (~2 s) if that GET is stalled. Linux
+        # doesn't poll it, so this only bit macOS. Answer it = 0x01 (valid).
+        clock_valid =   (setup.value == Const(ClockSourceControlSelectors.CS_CLOCK_VALID_CONTROL << 8, 16)) \
+                      & (setup.index == Const(USBDescriptors.CLOCK_ID << 8, 16))
+        request_clock_valid    = clock_valid    & setup.is_in_request
+
         SRATE_44_1k = Const(44100, 32)
         SRATE_48k   = Const(48000, 32)
         ZERO        = Const(0, 32)
@@ -111,6 +118,12 @@ class UAC2RequestHandlers(USBRequestHandler):
                         m.d.comb += [
                             Cat(transmitter.data[0:4]).eq(Const(48000, 32)),
                             transmitter.max_length.eq(4)
+                        ]
+                    with m.Elif(request_clock_valid & (setup.length == 1)):
+                        # CLOCK_VALID CUR -> 1 byte 0x01 (clock is valid/locked).
+                        m.d.comb += [
+                            transmitter.data[0].eq(Const(1, 8)),
+                            transmitter.max_length.eq(1)
                         ]
                     with m.Else():
                         m.d.comb += interface.handshakes_out.stall.eq(1)
