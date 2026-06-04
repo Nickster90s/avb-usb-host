@@ -5,6 +5,8 @@ __pycache__/
 
 # Amaranth/Yosys/nextpnr build outputs
 build/
+build_dac/
+build_dac_utmi/
 
 # Editor files
 .vscode/

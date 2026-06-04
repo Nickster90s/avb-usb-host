@@ -17,7 +17,11 @@
 
 import os
 from amaranth import (Module, Signal, Elaboratable, Instance, ClockSignal,
-                      ResetSignal, ClockDomain)
+                      ResetSignal, ClockDomain, Array, C, Cat, DomainRenamer)
+from amaranth.lib.cdc import FFSynchronizer
+from amaranth.lib.fifo import AsyncFIFO
+from amlib.utils import EdgeToPulse
+from clean_i2s_tx import CleanI2STx
 
 from luna                            import top_level_cli
 from luna.gateware.usb.usb2.device   import USBDevice
@@ -178,8 +182,12 @@ class USBLoopbackUTMI(Elaboratable):
             endpoint_number=2, max_packet_size=self.MAX_PACKET_SIZE)
         usb.add_endpoint(ep2_in)
 
-        m.submodules.out2ch = out2ch = USBStreamToChannels(
-            max_no_channels=self.NUMBER_OF_CHANNELS)
+        # All audio modules run in the USB domain (like ADAT) — the endpoint
+        # streams are usb-domain; running these in the default "sync" domain was
+        # a usb->sync crossing between two different 60 MHz clocks, which made the
+        # DAC path placement-fragile (intermittent no-audio / bleed / glitches).
+        m.submodules.out2ch = out2ch = DomainRenamer("usb")(USBStreamToChannels(
+            max_no_channels=self.NUMBER_OF_CHANNELS))
         m.d.comb += [
             out2ch.usb_stream_in.stream_eq(ep1_out.stream),
             # CRITICAL: drive no_channels_in to the host's ACTIVE channel count or
@@ -189,63 +197,184 @@ class USBLoopbackUTMI(Elaboratable):
             out2ch.no_channels_in.eq(2),
         ]
 
-        m.submodules.ch2in = ch2in = ChannelsToUSBStream(
-            max_nr_channels=self.NUMBER_OF_CHANNELS)
+        m.submodules.ch2in = ch2in = DomainRenamer("usb")(ChannelsToUSBStream(
+            max_nr_channels=self.NUMBER_OF_CHANNELS))
         m.d.comb += [
             ch2in.channel_stream_in.stream_eq(out2ch.channel_stream_out),
             ep2_in.stream.stream_eq(ch2in.usb_stream_out),
         ]
+        # CRITICAL: the DAC tap (StereoPairExtractor) snoops the channel stream
+        # PASSIVELY — it never drives ready (see its own comment "must not exert
+        # upstream back pressure"). So the decoder's drain is owned entirely by
+        # ch2in/the capture IN endpoint. During plain playback the host does NOT
+        # poll EP2-IN, so ChannelsToUSBStream fills once, drops ready, and FREEZES
+        # the whole channel stream -> the DAC tap sees no more valid&ready
+        # transfers -> amlib FIFO starves -> stale garbage on L, LED off.
+        # Force the decoder to always drain so the DAC always gets every sample;
+        # ch2in still receives the data and forwards what it can. (last-assignment
+        # wins over the stream_eq ready above.)
+        m.d.comb += out2ch.channel_stream_out.ready.eq(1)
 
-        # ---- Local I2S DAC monitor (ADAT-style: amlib I2STransmitter) ----
-        # Tap the decoder's channel stream (parallel to the loopback), pull
-        # ch0/ch1, serialise to the PCM5102A on a clean cd_audio divider. BCK/LRCK
-        # + data inverted to the pins per ADAT.
+        # ---- Local I2S DAC monitor (phase-locked CleanI2STx in cd_audio) ----
+        # amlib's I2STransmitter ran in the USB domain and treated BCK as an async
+        # input, so DOUT (usb-clocked) drifted in phase against the cd_audio BCK
+        # the DAC samples on -> periodic setup/hold violation -> constant harsh
+        # crackle (bit corruption). FIX: serialise entirely in cd_audio with
+        # CleanI2STx (BCK/LRCK/DOUT from ONE counter -> zero CDC skew). Samples
+        # cross usb->audio through an AsyncFIFO; CleanI2STx repeats the last frame
+        # on underrun. (See avb-aes3 i2s_clean.py — sim-bit-exact, HW-clean.)
         dac_pads = platform.request("i2s_dac", 0)
+
+        # Free-running cd_audio counter, used ONLY for the rate-feedback tick.
         audio_cnt = Signal(8)
         m.d.audio += audio_cnt.eq(audio_cnt + 1)
-        bck_sig  = Signal()
-        lrck_sig = Signal()
-        m.d.comb += [bck_sig.eq(audio_cnt[1]), lrck_sig.eq(audio_cnt[7])]
 
-        m.submodules.dac_ext = dac_ext = StereoPairExtractor(
-            self.NUMBER_OF_CHANNELS, fifo_depth=16)
-        m.submodules.dac_tx  = dac_tx  = I2STransmitter(
-            sample_width=self.AUDIO_BITS, fifo_depth=16)
+        # Extractor (usb): pull ch0/ch1 out of the decoded multichannel stream.
+        # It snoops passively, so a modest FIFO is fine — the elastic buffer is the
+        # AsyncFIFO below.
+        m.submodules.dac_ext = dac_ext = DomainRenamer("usb")(StereoPairExtractor(
+            self.NUMBER_OF_CHANNELS, fifo_depth=16))
         m.d.comb += [
             dac_ext.selected_channel_in.eq(0),
             dac_ext.channel_stream_in.valid.eq(
                 out2ch.channel_stream_out.valid & out2ch.channel_stream_out.ready),
             dac_ext.channel_stream_in.payload.eq(out2ch.channel_stream_out.payload),
             dac_ext.channel_stream_in.channel_nr.eq(out2ch.channel_stream_out.channel_nr),
+        ]
 
-            dac_tx.stream_in.stream_eq(dac_ext.channel_stream_out),
-            dac_tx.enable_in.eq(1),
-            dac_tx.serial_clock_in.eq(~bck_sig),
-            dac_tx.word_select_in .eq(~lrck_sig),
+        # Assemble L/R pairs (extractor first=L, last=R) into one 48-bit entry so
+        # both channels of a frame come from the SAME FIFO slot (no inter-channel
+        # skew), and push into the usb->audio elastic AsyncFIFO.
+        m.submodules.dac_fifo = dac_fifo = AsyncFIFO(
+            width=48, depth=1024, w_domain="usb", r_domain="audio")
+        cs = dac_ext.channel_stream_out
+        pair_l = Signal(24)
+        have_l = Signal()
+        m.d.comb += cs.ready.eq(1)            # always drain the extractor
+        with m.If(cs.valid):
+            with m.If(cs.first):              # left
+                m.d.usb += [pair_l.eq(cs.payload), have_l.eq(1)]
+            with m.Elif(have_l):              # right completes the pair
+                m.d.comb += [
+                    dac_fifo.w_data.eq(Cat(pair_l, cs.payload)),
+                    dac_fifo.w_en.eq(1),
+                ]
+                m.d.usb += have_l.eq(0)
 
-            dac_pads.bck .o.eq(~bck_sig),
-            dac_pads.lrck.o.eq(~lrck_sig),
-            dac_pads.din .o.eq(dac_tx.serial_data_out),
+        # Phase-locked serialiser in cd_audio. Pins driven DIRECTLY (no inversion).
+        m.submodules.dac_tx = dac_tx = DomainRenamer("audio")(CleanI2STx())
+
+        # One-shot prime at startup: hold the serialiser off until the FIFO has
+        # filled to a cushion ONCE, then run free forever (underruns thereafter
+        # are handled gracefully by CleanI2STx repeating the last frame — much
+        # better than re-gating, which dropped audio during every refill).
+        primed = Signal()
+        with m.If(dac_fifo.r_level >= 512):           # prime to half (~10.6 ms cushion)
+            m.d.audio += primed.eq(1)
+
+        if os.environ.get("DIAG_TONE"):
+            # DIAGNOSTIC: drive CleanI2STx from an FPGA-internal sine, bypassing
+            # the whole USB->decode->pair->FIFO path. Isolates serialiser+DAC+
+            # format from the USB data path. 256-entry LUT, one step per frame ->
+            # 47832/256 = 186.8 Hz tone on BOTH channels.
+            import math
+            N = 256
+            sine = Array(C(int(0.4 * (2**23 - 1) * math.sin(2 * math.pi * i / N)) & 0xFFFFFF, 24)
+                         for i in range(N))
+            ph = Signal(range(N))
+            with m.If(dac_tx.audio_ready):
+                m.d.audio += ph.eq(ph + 1)
+            samp = Signal(24)
+            m.d.comb += samp.eq(sine[ph])
+            m.d.comb += [
+                dac_tx.audio_l.eq(samp),
+                dac_tx.audio_r.eq(samp),
+                dac_tx.audio_valid.eq(1),
+            ]
+        else:
+            m.d.comb += [
+                dac_tx.audio_l.eq(dac_fifo.r_data[0:24]),
+                dac_tx.audio_r.eq(dac_fifo.r_data[24:48]),
+                dac_tx.audio_valid.eq(dac_fifo.r_rdy & primed),
+                dac_fifo.r_en.eq(dac_tx.audio_ready),
+            ]
+
+        m.d.comb += [
+            dac_pads.bck .o.eq(dac_tx.bck),
+            dac_pads.lrck.o.eq(dac_tx.lrck),
+            dac_pads.din .o.eq(dac_tx.dout),
+        ]
+
+        # ---- Async sample-rate feedback (ADAT/smunaut "honest measured") ----
+        # Count cd_audio ticks vs the USB SOF: the tick count over 256 microframes
+        # IS the Q16.16 samples/µframe feedback (cd_audio = 256·fs ->
+        # count = cd_audio·256/8000 = (fs/8000)·65536; 12.288MHz -> 0x60000). A
+        # small proportional trim from amlib's tx_fifo level keeps it centred.
+        # Updated once per 256 SOF -> rock-stable (no hunting), and it reports our
+        # ACTUAL rate so the host slaves to us -> no drops, no L/R bleed. This
+        # replaces the bang-bang servo, which hunted the rate and broke framing.
+        # Tap the audio clock as a FABRIC signal (audio_cnt[0] = cd_audio/2, a
+        # SLICE output), NOT the global clock net — nextpnr-xilinx cannot route a
+        # BUFG clock into a fabric FF (ClockSignal("audio") fails routing). XOR
+        # consecutive samples -> a pulse per audio_cnt[0] EDGE = one per cd_audio
+        # cycle (both edges), matching ADAT's per-audio-clock-cycle count.
+        audio_div_usb = Signal()
+        audio_div_p   = Signal()
+        m.submodules += FFSynchronizer(audio_cnt[0], audio_div_usb, o_domain="usb")
+        m.d.usb += audio_div_p.eq(audio_div_usb)
+        audio_tick = Signal()
+        m.d.comb += audio_tick.eq(audio_div_usb ^ audio_div_p)
+        fb            = Signal(32, reset=0x60000)
+        audio_counter = Signal(19)
+        sof_counter   = Signal(8)
+        with m.If(audio_tick):
+            m.d.usb += audio_counter.eq(audio_counter + 1)
+        # ADAT's self-centering feedback term. The true rate lies BETWEEN the
+        # measured count (feedback=count -> FIFO underflows slowly) and count+1
+        # (-> FIFO fills to overflow slowly). So bias to +1 (fill) and subtract a
+        # term proportional to the extractor FIFO fill level -> the FIFO settles
+        # at a centred level instead of railing. Updated once per 256 uframes
+        # (~32 ms) and only +-a few LSB on a ~393216 value -> 0.001 % rate dither,
+        # inaudible, NOT the bang-bang servo that hunted before. This is the piece
+        # the pure-`count+1` build was missing (it railed near-empty).
+        level_fb = Signal(3)
+        # Read the usb->audio AsyncFIFO write level (the real elastic buffer,
+        # depth 1024 -> 0..1024). >>8 -> 0..4; the proportional term gives the
+        # servo +-4 LSB authority and parks the buffer near half (~512), with
+        # ~10 ms headroom each way to ride out sporadic host delivery gaps without
+        # underrun. (w_level is in the usb/write domain.)
+        m.d.comb += level_fb.eq(dac_fifo.w_level >> 8)
+        with m.If(usb.sof_detected):
+            m.d.usb += sof_counter.eq(sof_counter + 1)
+            with m.If(sof_counter == 0):               # every 256 microframes
+                m.d.usb += [
+                    fb.eq(audio_counter + 1 - level_fb),
+                    audio_counter.eq(0),
+                ]
+        bit_pos = Signal(5)
+        m.d.comb += [
+            ep1_in.bytes_in_frame.eq(4),
+            bit_pos.eq(ep1_in.address << 3),
+            ep1_in.value.eq(0xFF & (fb >> bit_pos)),
         ]
 
         m.d.comb += usb.connect.eq(1)
 
-        # Diagnostic LED: does the wrapper complete ULPI writes at THIS
-        # phase? (LUNA drives the controls — confirmed term_select fast.)
-        # STP pulses at the end of each write; NXT pulses per accepted byte.
-        #   slow → wrapper not completing writes at this phase
-        #   fast → wrapper completing writes → issue is downstream in LUNA
-        led      = platform.request("user_led", 0)
-        counter  = Signal(26)
-        stp_seen = Signal()
-        nxt_seen = Signal()
-        m.d.usb += [
-            counter.eq(counter + 1),
-            stp_seen.eq(stp_seen | ulpi.stp.o),
-            nxt_seen.eq(nxt_seen | ulpi.nxt.i),
-        ]
-        from amaranth import Mux
-        m.d.comb += led.o.eq(Mux(stp_seen & nxt_seen, counter[21], counter[25]))
+        # Diagnostic LED = DIRECT UNDERRUN instrument (audio domain). CleanI2STx
+        # pulses `underrun` whenever it needs a frame but the FIFO is empty. Peak-
+        # hold each pulse ~85 ms (0xFFFFF cd_audio cycles @ 12.245 MHz) so even a
+        # single underrun is visible:
+        #   LED DARK            = no underruns -> buffer healthy, jitter is NOT
+        #                         starvation (look elsewhere: host gaps? L/R?).
+        #   LED occasional blip = sporadic underruns (host scheduling gaps).
+        #   LED steady/flicker  = frequent underruns -> buffer genuinely starving.
+        led    = platform.request("user_led", 0)
+        ur_hold = Signal(20)
+        with m.If(dac_tx.underrun):
+            m.d.audio += ur_hold.eq(0xFFFFF)
+        with m.Elif(ur_hold != 0):
+            m.d.audio += ur_hold.eq(ur_hold - 1)
+        m.d.comb += led.o.eq(ur_hold != 0)
 
         return m
 
