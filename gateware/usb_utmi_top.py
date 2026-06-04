@@ -17,7 +17,7 @@
 
 import os
 from amaranth import (Module, Signal, Elaboratable, Instance, ClockSignal,
-                      ResetSignal, ClockDomain, Array, C, Cat, DomainRenamer)
+                      ResetSignal, ClockDomain, Array, C, Cat, signed, DomainRenamer)
 from amaranth.lib.cdc import FFSynchronizer
 from amaranth.lib.fifo import AsyncFIFO
 from amlib.utils import EdgeToPulse
@@ -329,26 +329,52 @@ class USBLoopbackUTMI(Elaboratable):
         sof_counter   = Signal(8)
         with m.If(audio_tick):
             m.d.usb += audio_counter.eq(audio_counter + 1)
-        # ADAT's self-centering feedback term. The true rate lies BETWEEN the
-        # measured count (feedback=count -> FIFO underflows slowly) and count+1
-        # (-> FIFO fills to overflow slowly). So bias to +1 (fill) and subtract a
-        # term proportional to the extractor FIFO fill level -> the FIFO settles
-        # at a centred level instead of railing. Updated once per 256 uframes
-        # (~32 ms) and only +-a few LSB on a ~393216 value -> 0.001 % rate dither,
-        # inaudible, NOT the bang-bang servo that hunted before. This is the piece
-        # the pure-`count+1` build was missing (it railed near-empty).
-        level_fb = Signal(3)
-        # Read the usb->audio AsyncFIFO write level (the real elastic buffer,
-        # depth 1024 -> 0..1024). >>8 -> 0..4; the proportional term gives the
-        # servo +-4 LSB authority and parks the buffer near half (~512), with
-        # ~10 ms headroom each way to ride out sporadic host delivery gaps without
-        # underrun. (w_level is in the usb/write domain.)
-        m.d.comb += level_fb.eq(dac_fifo.w_level >> 8)
+        # ---- Closed-loop PI servo on the FIFO level (CENTRED-FIFO experiment) ----
+        # Replaces the crude `+1 - (level>>8)` term with a real PI servo (ported
+        # from avb-aes3 mcr.c::mcr_usb_lock). `audio_counter` is the measured
+        # nominal consume rate (cd_audio ticks / 256 uframes = our Q16.16 rate);
+        # the PI adds a correction that drives the host to hold the FIFO at CENTER.
+        # Goal: keep dac_fifo CENTRED -> never under/overflows -> bit-perfect
+        # regime, IF the host honours feedback. The underrun LED is the witness:
+        # if it stays dark, PipeWire is honouring us and the FIFO is centred; if it
+        # keeps flashing, the host ignores fine feedback and we need the
+        # adjustable-clock (NCO/MMCM) approach instead.
+        #   error = CENTER - level   (>0 below centre -> tell host to send MORE)
+        #   corr  = err*KP + integral(KI=1), anti-windup + clamp to ~+-1.5%
+        #   fb    = audio_counter + corr
+        CENTER    = 32         # target for w_level>>4  (fifo ~512 of 1024)
+        KP        = 256
+        INT_CLAMP = 1024
+        CORR_MAX  = 6000       # ~1.5 % of the ~391837 nominal fb
+        level_b = Signal(7)
+        err     = Signal(signed(9))
+        integ   = Signal(signed(16))
+        new_i   = Signal(signed(17))
+        corr    = Signal(signed(24))
+        corr_c  = Signal(signed(20))
+        m.d.comb += [
+            level_b.eq(dac_fifo.w_level >> 4),
+            err.eq(CENTER - level_b),
+            new_i.eq(integ + err),
+            corr.eq(err * KP + integ),
+        ]
+        with m.If(corr > CORR_MAX):
+            m.d.comb += corr_c.eq(CORR_MAX)
+        with m.Elif(corr < -CORR_MAX):
+            m.d.comb += corr_c.eq(-CORR_MAX)
+        with m.Else():
+            m.d.comb += corr_c.eq(corr)
         with m.If(usb.sof_detected):
             m.d.usb += sof_counter.eq(sof_counter + 1)
-            with m.If(sof_counter == 0):               # every 256 microframes
+            with m.If(sof_counter == 0):               # every 256 uframes (~31 Hz)
+                with m.If(new_i > INT_CLAMP):
+                    m.d.usb += integ.eq(INT_CLAMP)
+                with m.Elif(new_i < -INT_CLAMP):
+                    m.d.usb += integ.eq(-INT_CLAMP)
+                with m.Else():
+                    m.d.usb += integ.eq(new_i)
                 m.d.usb += [
-                    fb.eq(audio_counter + 1 - level_fb),
+                    fb.eq(audio_counter + corr_c),
                     audio_counter.eq(0),
                 ]
         bit_pos = Signal(5)
@@ -360,21 +386,20 @@ class USBLoopbackUTMI(Elaboratable):
 
         m.d.comb += usb.connect.eq(1)
 
-        # Diagnostic LED = DIRECT UNDERRUN instrument (audio domain). CleanI2STx
-        # pulses `underrun` whenever it needs a frame but the FIFO is empty. Peak-
-        # hold each pulse ~85 ms (0xFFFFF cd_audio cycles @ 12.245 MHz) so even a
-        # single underrun is visible:
-        #   LED DARK            = no underruns -> buffer healthy, jitter is NOT
-        #                         starvation (look elsewhere: host gaps? L/R?).
-        #   LED occasional blip = sporadic underruns (host scheduling gaps).
-        #   LED steady/flicker  = frequent underruns -> buffer genuinely starving.
-        led    = platform.request("user_led", 0)
-        ur_hold = Signal(20)
-        with m.If(dac_tx.underrun):
-            m.d.audio += ur_hold.eq(0xFFFFF)
-        with m.Elif(ur_hold != 0):
-            m.d.audio += ur_hold.eq(ur_hold - 1)
-        m.d.comb += led.o.eq(ur_hold != 0)
+        # LED = live FIFO-LEVEL brightness meter (PWM, usb domain). Duty cycle =
+        # w_level / 1024, refreshed at 60 MHz/1024 = 58 kHz (no visible flicker),
+        # so LED BRIGHTNESS directly shows the elastic-buffer fill:
+        #   DARK / very dim  = near EMPTY  (draining / underrunning  -> not bit-perfect)
+        #   ~HALF brightness = CENTRED ~512 (servo holding it -> healthy)
+        #   FULL bright      = near FULL  (overfilling, about to drop)
+        # This replaces the underrun meter, whose 85 ms hold saturated solid at
+        # just ~12 underruns/s and so read "empty" even with steady audio. Watch
+        # whether the brightness sits steady at ~half (centred) or sinks to dim
+        # (PipeWire under-feeding -> host ignores our feedback -> need NCO path).
+        led = platform.request("user_led", 0)
+        pwm = Signal(10)
+        m.d.usb += pwm.eq(pwm + 1)
+        m.d.comb += led.o.eq(pwm < dac_fifo.w_level)
 
         return m
 
