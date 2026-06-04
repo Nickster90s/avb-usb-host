@@ -180,7 +180,14 @@ class USBLoopbackUTMI(Elaboratable):
 
         m.submodules.out2ch = out2ch = USBStreamToChannels(
             max_no_channels=self.NUMBER_OF_CHANNELS)
-        m.d.comb += out2ch.usb_stream_in.stream_eq(ep1_out.stream)
+        m.d.comb += [
+            out2ch.usb_stream_in.stream_eq(ep1_out.stream),
+            # CRITICAL: drive no_channels_in to the host's ACTIVE channel count or
+            # the decoder mis-frames (last_channel = no_channels_in-1 = 7 when
+            # undriven → expects 8ch frames). The host streams stereo Altset 1 =
+            # 2ch (FL FR), so frame on 2 → channel_nr 0=L,1=R for the DAC tap.
+            out2ch.no_channels_in.eq(2),
+        ]
 
         m.submodules.ch2in = ch2in = ChannelsToUSBStream(
             max_nr_channels=self.NUMBER_OF_CHANNELS)

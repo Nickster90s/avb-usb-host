@@ -94,6 +94,9 @@ class USBLoopback(Elaboratable):
             max_no_channels=self.NUMBER_OF_CHANNELS)
         m.d.comb += [
             out2ch.usb_stream_in.stream_eq(ep1_out.stream),
+            # Drive no_channels_in to the host's active channel count (stereo
+            # Altset 1 = 2ch); undriven → decoder frames for 8ch and mis-frames.
+            out2ch.no_channels_in.eq(2),
         ]
 
         # Internal loopback: dump OUT's channel stream straight back to IN.
