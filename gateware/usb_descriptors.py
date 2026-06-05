@@ -69,6 +69,18 @@ class USBDescriptors():
 
     # ---- public entry point (unchanged signature) ------------------------
     def create_usb2_descriptors(self, no_channels: int, max_packet_size: int):
+        # Capture (IN) streaming interface is DROPPED by default (playback-only
+        # device). ROOT CAUSE of the macOS "~2 s then silence" failure: macOS
+        # opens the device FULL-DUPLEX and runs the capture stream alongside
+        # playback on one IO work loop. Our capture endpoint (0x82) delivers no
+        # real audio yet (it's a stub for the future AVB->USB return path), so
+        # it starves the shared loop -> Audio IO Overload -> stop at ~2 s. Linux
+        # (aplay) opens playback-only and never hit this, which is why it always
+        # worked. HW-VERIFIED 2026-06-05: playback-only = clean continuous audio
+        # on BOTH macOS and Linux. Re-enable capture with PLAYBACK_ONLY=0 once
+        # EP 0x82 carries a real stream.
+        import os
+        playback_only = os.environ.get("PLAYBACK_ONLY", "1") == "1"
         descriptors = DeviceDescriptorCollection()
 
         with descriptors.DeviceDescriptor() as d:
@@ -88,7 +100,7 @@ class USBDescriptors():
             # Interface Association: the audio function spans IF0..IF2.
             iad = uac2.InterfaceAssociationDescriptorEmitter()
             iad.bFirstInterface = 0
-            iad.bInterfaceCount = 3
+            iad.bInterfaceCount = 2 if playback_only else 3
             cfg.add_subordinate_descriptor(iad)
 
             # IF0 standard AudioControl interface
@@ -98,16 +110,17 @@ class USBDescriptors():
 
             # IF0 class-specific AudioControl (clock + terminals)
             cfg.add_subordinate_descriptor(
-                self._audio_control_interface(no_channels))
+                self._audio_control_interface(no_channels, playback_only))
 
-            # IF1 playback (OUT) + IF2 capture (IN)
+            # IF1 playback (OUT); IF2 capture (IN) unless playback-only.
             self._streaming_out(cfg, no_channels, max_packet_size)
-            self._streaming_in(cfg, no_channels, max_packet_size)
+            if not playback_only:
+                self._streaming_in(cfg, no_channels, max_packet_size)
 
         return descriptors
 
     # ---- AudioControl: clock + 4 terminals -------------------------------
-    def _audio_control_interface(self, n: int):
+    def _audio_control_interface(self, n: int, playback_only: bool = False):
         ac = uac2.ClassSpecificAudioControlInterfaceDescriptorEmitter()
 
         clk = uac2.ClockSourceDescriptorEmitter()
@@ -142,20 +155,22 @@ class USBDescriptors():
         ac.add_subordinate_descriptor(pb_out)
 
         # Capture: Microphone IN terminal → USB-streaming OUT terminal.
-        cap_in = uac2.InputTerminalDescriptorEmitter()
-        cap_in.bTerminalID     = 4
-        cap_in.wTerminalType   = uac2.InputTerminalTypes.MICROPHONE
-        cap_in.bNrChannels     = n
-        cap_in.bmChannelConfig = self.CHCFG_STEREO if n == 2 else self.CHCFG_DISCRETE
-        cap_in.bCSourceID      = self.CLOCK_ID
-        ac.add_subordinate_descriptor(cap_in)
+        # Omitted entirely for a playback-only device (see create_usb2_descriptors).
+        if not playback_only:
+            cap_in = uac2.InputTerminalDescriptorEmitter()
+            cap_in.bTerminalID     = 4
+            cap_in.wTerminalType   = uac2.InputTerminalTypes.MICROPHONE
+            cap_in.bNrChannels     = n
+            cap_in.bmChannelConfig = self.CHCFG_STEREO if n == 2 else self.CHCFG_DISCRETE
+            cap_in.bCSourceID      = self.CLOCK_ID
+            ac.add_subordinate_descriptor(cap_in)
 
-        cap_out = uac2.OutputTerminalDescriptorEmitter()
-        cap_out.bTerminalID   = 5
-        cap_out.wTerminalType = uac2.USBTerminalTypes.USB_STREAMING
-        cap_out.bSourceID     = 4
-        cap_out.bCSourceID    = self.CLOCK_ID
-        ac.add_subordinate_descriptor(cap_out)
+            cap_out = uac2.OutputTerminalDescriptorEmitter()
+            cap_out.bTerminalID   = 5
+            cap_out.wTerminalType = uac2.USBTerminalTypes.USB_STREAMING
+            cap_out.bSourceID     = 4
+            cap_out.bCSourceID    = self.CLOCK_ID
+            ac.add_subordinate_descriptor(cap_out)
 
         return ac
 
