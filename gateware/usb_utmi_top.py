@@ -17,7 +17,8 @@
 
 import os
 from amaranth import (Module, Signal, Elaboratable, Instance, ClockSignal,
-                      ResetSignal, ClockDomain, Array, C, Cat, Mux, signed, DomainRenamer)
+                      ResetSignal, ClockDomain, Array, C, Cat, Mux, signed,
+                      DomainRenamer, EnableInserter)
 from amaranth.lib.cdc import FFSynchronizer
 from amaranth.lib.fifo import AsyncFIFO
 from amlib.utils import EdgeToPulse
@@ -179,6 +180,14 @@ class USBLoopbackUTMI(Elaboratable):
         ])
         uac2_handler = UAC2RequestHandlers()
         control_ep.add_request_handler(uac2_handler)
+        # The active sample rate is set by the AVB/AVDECC side and the USB clock
+        # source reports just that one rate read-only (host follows). On this
+        # standalone DAC top there's no AVDECC, so a build env selects it:
+        # RATE_48K=1 -> 48k, default -> 96k. (In the bridge, a firmware CSR drives
+        # uac2_handler.current_rate_48k instead.) The serialiser + feedback follow
+        # the same signal.
+        rate_48k_sel = int(os.environ.get("RATE_48K", "0")) & 1
+        m.d.comb += uac2_handler.current_rate_48k.eq(rate_48k_sel)
 
         # OUT endpoint per-transaction size = the high-bandwidth base for the
         # largest (N-ch) altset, so the host's 3-transaction microframes are
@@ -209,9 +218,14 @@ class USBLoopbackUTMI(Elaboratable):
         # altset 1 -> 2 ch, altset 2 -> NUMBER_OF_CHANNELS (8). The DAC extractor
         # pulls ch0/ch1 either way, so stereo monitoring works for both.
         out_alt = uac2_handler.output_interface_altsetting_nr
+        # Map the active OUT altset -> channel count, matching the descriptor's
+        # OUT_ALTSETS (altset i+1 -> OUT_ALTSETS[i]). altset0 = zero-bandwidth.
+        _alt_ch = [2] + list(USBDescriptors.OUT_ALTSETS)   # [2, 2, 8, 48]
+        _alt_ch += [_alt_ch[-1]] * (8 - len(_alt_ch))      # pad to 8 (out_alt is 3-bit)
+        ch_for_alt = Array([C(v, 7) for v in _alt_ch])
         m.d.comb += [
             out2ch.usb_stream_in.stream_eq(ep1_out.stream),
-            out2ch.no_channels_in.eq(Mux(out_alt == 2, self.NUMBER_OF_CHANNELS, 2)),
+            out2ch.no_channels_in.eq(ch_for_alt[out_alt]),
         ]
 
         m.submodules.ch2in = ch2in = DomainRenamer("usb")(ChannelsToUSBStream(
@@ -278,8 +292,25 @@ class USBLoopbackUTMI(Elaboratable):
                 ]
                 m.d.usb += have_l.eq(0)
 
-        # Phase-locked serialiser in cd_audio. Pins driven DIRECTLY (no inversion).
-        m.submodules.dac_tx = dac_tx = DomainRenamer("audio")(CleanI2STx())
+        # ---- Dual-rate (48k/96k) framing ---------------------------------
+        # cd_audio is a single 24.49 MHz clock = 256x96k = 512x48k. For 96k the
+        # serialiser runs full-rate; for 48k we clock-enable it every OTHER cycle
+        # (EnableInserter) so BCK/LRCK/DOUT all halve -> 48k framing, no clock mux.
+        # The selected rate (from the host's SET CUR) is in the usb domain; sync
+        # it into cd_audio.
+        rate_48k_aud = Signal()
+        m.submodules += FFSynchronizer(uac2_handler.current_rate_48k,
+                                       rate_48k_aud, o_domain="audio")
+        audio_ce = Signal(reset=1)
+        with m.If(rate_48k_aud):
+            m.d.audio += audio_ce.eq(~audio_ce)   # 48k: enable every other cycle
+        with m.Else():
+            m.d.audio += audio_ce.eq(1)           # 96k: always enabled
+
+        # Phase-locked serialiser in cd_audio, clock-enabled for the selected rate.
+        # Pins driven DIRECTLY (no inversion).
+        m.submodules.dac_tx = dac_tx = \
+            DomainRenamer("audio")(EnableInserter(audio_ce)(CleanI2STx()))
 
         # One-shot prime at startup: hold the serialiser off until the FIFO has
         # filled to a cushion ONCE, then run free forever (underruns thereafter
@@ -318,7 +349,9 @@ class USBLoopbackUTMI(Elaboratable):
                 dac_tx.audio_l.eq(dac_fifo.r_data[8:32]),
                 dac_tx.audio_r.eq(dac_fifo.r_data[40:64]),
                 dac_tx.audio_valid.eq(dac_fifo.r_rdy & primed),
-                dac_fifo.r_en.eq(dac_tx.audio_ready),
+                # gate the pop with audio_ce: at 48k the serialiser's cnt (and so
+                # audio_ready) is held for 2 cycles; only pop on the enabled one.
+                dac_fifo.r_en.eq(dac_tx.audio_ready & audio_ce),
             ]
 
         m.d.comb += [
@@ -403,8 +436,12 @@ class USBLoopbackUTMI(Elaboratable):
                     m.d.usb += integ.eq(-INT_CLAMP)
                 with m.Else():
                     m.d.usb += integ.eq(new_i)
+                # audio_counter measures cd_audio ticks (the 96k clock). At 48k we
+                # consume every OTHER tick (audio_ce), so the nominal samples/uframe
+                # is half -> use audio_counter>>1 as the feedback base.
                 m.d.usb += [
-                    fb.eq(audio_counter + corr_c),
+                    fb.eq(Mux(uac2_handler.current_rate_48k,
+                              audio_counter >> 1, audio_counter) + corr_c),
                     audio_counter.eq(0),
                 ]
         bit_pos = Signal(5)

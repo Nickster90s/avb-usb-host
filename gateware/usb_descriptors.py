@@ -52,7 +52,13 @@ class USBDescriptors():
     # full 32-bit samples.
     SUBSLOT_SIZE   = 4
     BIT_RESOLUTION = 32      # 96k/32-bit branch (was 24); full 32-bit subslot
-    SAMPLE_RATE    = 96000
+    SAMPLE_RATE    = 96000   # MAX rate — used to size wMaxPacketSize (covers 48k)
+    SAMPLE_RATES   = (48000, 96000)   # host-selectable rates (UAC2 clock source)
+
+    # OUT (playback) streaming alt-settings = channel counts. altset0 is the
+    # required zero-bandwidth default; these become altset 1, 2, 3 ...
+    #   1 = 2ch stereo (host default), 2 = 8ch (one AAF stream), 3 = 48ch (bridge)
+    OUT_ALTSETS    = (2, 8, 48)
 
     # Per-altset OUT packet sizing. Returns (endpoint_base, descriptor_wMaxPacketSize).
     # bytes/uframe = (n*SUBSLOT_SIZE) * (fs/8000 + 1)   (+1 frame = feedback overshoot)
@@ -150,9 +156,10 @@ class USBDescriptors():
         clk.bClockID     = self.CLOCK_ID
         clk.bmAttributes = uac2.ClockAttributes.INTERNAL_FIXED_CLOCK
         # bmControls bitmap: bits[1:0]=freq control, bits[3:2]=validity control.
-        # Advertise BOTH as host-readable: freq read-only (01) + clock-valid
-        # read-only (01<<2) = 0x05. macOS queries CLOCK_VALID and needs it present
-        # + answered (see requesthandlers) or it stops the stream after ~2 s.
+        # The USB host does NOT pick the rate — the AVB/AVDECC side sets it and
+        # the device reports that ONE rate read-only (the host follows). So freq
+        # is HOST_READ_ONLY (01) + clock-valid read-only (01<<2). macOS queries
+        # CLOCK_VALID and needs it present + answered or it stops the stream ~2 s.
         clk.bmControls   = uac2.ClockFrequencyControl.HOST_READ_ONLY | (0b01 << 2)
         ac.add_subordinate_descriptor(clk)
 
@@ -251,19 +258,16 @@ class USBDescriptors():
 
         out_ep = USBDirection.OUT.to_endpoint_address(1)   # EP 0x01
         fb_ep  = USBDirection.IN.to_endpoint_address(1)    # EP 0x81 feedback
-        # Per-altset wMaxPacketSize: stereo fits one transaction; the N-ch altset
-        # may need high-bandwidth iso (mult bits) — _out_packet handles both and
-        # keeps the base frame-aligned.
-        _, stereo_wmps = self._out_packet(2)
-        # altset1 stereo (host default), altset2 N-ch (the bridge).
-        self._streaming_altset(cfg, iface=1, terminal_link=2, ep_addr=out_ep,
-                               alt=1, ch=2, chcfg=self.CHCFG_STEREO,
-                               max_packet_size=stereo_wmps, feedback_ep=fb_ep)
-        if n > 2:
-            _, nch_wmps = self._out_packet(n)
+        # One streaming alt-setting per channel count in OUT_ALTSETS (altset 1..).
+        # Per-altset wMaxPacketSize is sized for the MAX rate (96k) so the same
+        # descriptor works at 48k too; _out_packet picks single- vs high-bandwidth
+        # iso and keeps the base frame-aligned.
+        for i, ch in enumerate(self.OUT_ALTSETS):
+            _, wmps = self._out_packet(ch)
+            chcfg = self.CHCFG_STEREO if ch == 2 else self.CHCFG_DISCRETE
             self._streaming_altset(cfg, iface=1, terminal_link=2, ep_addr=out_ep,
-                                   alt=2, ch=n, chcfg=self.CHCFG_DISCRETE,
-                                   max_packet_size=nch_wmps, feedback_ep=fb_ep)
+                                   alt=i + 1, ch=ch, chcfg=chcfg,
+                                   max_packet_size=wmps, feedback_ep=fb_ep)
 
     # ---- IF2 capture (device → host) -------------------------------------
     def _streaming_in(self, cfg, n: int, max_packet_size: int):

@@ -20,6 +20,10 @@ class UAC2RequestHandlers(USBRequestHandler):
         self.output_interface_altsetting_nr = Signal(3)
         self.input_interface_altsetting_nr  = Signal(3)
         self.interface_settings_changed     = Signal()
+        # Multi-rate clock source: 0 = 96 kHz (default), 1 = 48 kHz. Host selects
+        # via SET CUR(SAM_FREQ); the gateware adapts framing + feedback. Exposed
+        # to the top level.
+        self.current_rate_48k               = Signal()
 
     def elaborate(self, platform):
         m = Module()
@@ -80,9 +84,14 @@ class UAC2RequestHandlers(USBRequestHandler):
                       & (setup.index == Const(USBDescriptors.CLOCK_ID << 8, 16))
         request_clock_valid    = clock_valid    & setup.is_in_request
 
-        SRATE_44_1k = Const(44100, 32)
-        SRATE_48k   = Const(96000, 32)   # 96k/32-bit branch (name kept; value 96000)
+        SRATE_48k   = Const(48000, 32)
+        SRATE_96k   = Const(96000, 32)
         ZERO        = Const(0, 32)
+        # The active rate is driven from OUTSIDE (AVB/AVDECC side, or a build
+        # default on the DAC top). The clock source reports just this one rate,
+        # read-only; the host follows it. Plain Python expression (not an m.d
+        # statement) so it doesn't break the If/Elif chain.
+        cur_rate    = Mux(self.current_rate_48k, SRATE_48k, SRATE_96k)
 
         with m.Elif(setup.type == USBRequestType.CLASS):
             # Claim ALL class requests — this device owns the audio class
@@ -95,10 +104,8 @@ class UAC2RequestHandlers(USBRequestHandler):
                     with m.If(request_clock_freq):
                         m.d.comb += [
                             Cat(transmitter.data).eq(
-                                Cat(Const(0x1,   16),   # no triples
-                                    SRATE_48k,   # MIN
-                                    SRATE_48k,   # MAX
-                                    ZERO)),      # RES
+                                Cat(Const(0x1, 16),            # wNumSubRanges = 1
+                                    cur_rate, cur_rate, ZERO)),  # the one active rate
                             transmitter.max_length.eq(setup.length)
                         ]
                     with m.Else():
@@ -115,8 +122,9 @@ class UAC2RequestHandlers(USBRequestHandler):
                 with m.Case(AudioClassSpecificRequestCodes.CUR):
                     m.d.comb += transmitter.stream.attach(self.interface.tx)
                     with m.If(request_clock_freq & (setup.length == 4)):
+                        # GET CUR(SAM_FREQ) -> the currently selected rate.
                         m.d.comb += [
-                            Cat(transmitter.data[0:4]).eq(Const(96000, 32)),
+                            Cat(transmitter.data[0:4]).eq(cur_rate),
                             transmitter.max_length.eq(4)
                         ]
                     with m.Elif(request_clock_valid & (setup.length == 1)):
@@ -126,6 +134,7 @@ class UAC2RequestHandlers(USBRequestHandler):
                             transmitter.max_length.eq(1)
                         ]
                     with m.Else():
+                        # Read-only clock: nothing to SET. Stall anything else.
                         m.d.comb += interface.handshakes_out.stall.eq(1)
 
                     # ... trigger it to respond when data's requested...
