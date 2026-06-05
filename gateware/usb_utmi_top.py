@@ -162,8 +162,14 @@ class USBLoopbackUTMI(Elaboratable):
         usb.data_clock = 60e6
 
         descriptors     = USBDescriptors(use_ila=False, ila_max_packet_size=512)
+        # DESC_CH env overrides the advertised channel count (default = 8). Set
+        # DESC_CH=2 for a clean stereo device (only the 2ch altset, FL/FR
+        # positions) — macOS test for the "starting channel zero" / open-loop
+        # feedback failure. The gateware still tracks the active altset for
+        # no_channels_in, so decode matches whatever the host selects.
+        desc_ch = int(os.environ.get("DESC_CH", self.NUMBER_OF_CHANNELS))
         usb_descriptors = descriptors.create_usb2_descriptors(
-                              self.NUMBER_OF_CHANNELS, self.MAX_PACKET_SIZE)
+                              desc_ch, self.MAX_PACKET_SIZE)
 
         control_ep = usb.add_control_endpoint()
         control_ep.add_standard_request_handlers(usb_descriptors, blacklist=[

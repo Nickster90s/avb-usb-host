@@ -127,7 +127,10 @@ class USBDescriptors():
         pb_in.bTerminalID     = 2
         pb_in.wTerminalType   = uac2.USBTerminalTypes.USB_STREAMING
         pb_in.bNrChannels     = n
-        pb_in.bmChannelConfig = self.CHCFG_DISCRETE
+        # Defined channel positions for 2ch (FL+FR); DISCRETE only for >2ch.
+        # bmChannelConfig=0 (discrete) made macOS log "starting channel number
+        # should not be zero" and fail to fully set up the stream/clock.
+        pb_in.bmChannelConfig = self.CHCFG_STEREO if n == 2 else self.CHCFG_DISCRETE
         pb_in.bCSourceID      = self.CLOCK_ID
         ac.add_subordinate_descriptor(pb_in)
 
@@ -143,7 +146,7 @@ class USBDescriptors():
         cap_in.bTerminalID     = 4
         cap_in.wTerminalType   = uac2.InputTerminalTypes.MICROPHONE
         cap_in.bNrChannels     = n
-        cap_in.bmChannelConfig = self.CHCFG_DISCRETE
+        cap_in.bmChannelConfig = self.CHCFG_STEREO if n == 2 else self.CHCFG_DISCRETE
         cap_in.bCSourceID      = self.CLOCK_ID
         ac.add_subordinate_descriptor(cap_in)
 
@@ -197,7 +200,7 @@ class USBDescriptors():
                                    | (USBSynchronizationType.NONE << 2)
                                    | (USBUsageType.FEEDBACK << 4))
             fb.wMaxPacketSize   = 4
-            fb.bInterval        = 4
+            fb.bInterval        = 4   # HS feedback = once per 1ms frame (spec); 1 is rejected by macOS
             cfg.add_subordinate_descriptor(fb)
 
     # ---- IF1 playback (host → device) ------------------------------------
