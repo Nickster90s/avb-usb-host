@@ -52,6 +52,29 @@ class USBDescriptors():
     # full 32-bit samples.
     SUBSLOT_SIZE   = 4
     BIT_RESOLUTION = 32      # 96k/32-bit branch (was 24); full 32-bit subslot
+    SAMPLE_RATE    = 96000
+
+    # Per-altset OUT packet sizing. Returns (endpoint_base, descriptor_wMaxPacketSize).
+    # bytes/uframe = (n*SUBSLOT_SIZE) * (fs/8000 + 1)   (+1 frame = feedback overshoot)
+    # If that fits one 1024-byte transaction -> single transaction. Otherwise we
+    # need HIGH-BANDWIDTH iso (2 or 3 transactions/uframe via the mult bits in
+    # wMaxPacketSize). CRITICAL: the per-transaction base MUST be a whole multiple
+    # of the sample-frame size (n*SUBSLOT_SIZE) so every transaction starts on a
+    # frame boundary — the decoder keys framing off the per-transaction `first`
+    # marker; a base that splits a frame mid-channel would mis-frame the stream.
+    @classmethod
+    def _out_packet(cls, n: int):
+        frame = n * cls.SUBSLOT_SIZE
+        total = frame * (cls.SAMPLE_RATE // 8000 + 1)
+        if total <= 1024:
+            return total, total
+        for k in (2, 3):                       # transactions per microframe
+            base = ((512 // frame) + 1) * frame # smallest frame-multiple > 512
+            while base <= 1024:
+                if k * base >= total:
+                    return base, base | ((k - 1) << 11)
+                base += frame
+        raise ValueError(f"{total} bytes/uframe exceeds 3x1024 high-bandwidth iso")
 
     # UAC2 bmChannelConfig spatial masks. FL+FR for the stereo
     # compatibility alt-setting; 0 (discrete / "raw" channels) for the
@@ -228,14 +251,19 @@ class USBDescriptors():
 
         out_ep = USBDirection.OUT.to_endpoint_address(1)   # EP 0x01
         fb_ep  = USBDirection.IN.to_endpoint_address(1)    # EP 0x81 feedback
+        # Per-altset wMaxPacketSize: stereo fits one transaction; the N-ch altset
+        # may need high-bandwidth iso (mult bits) — _out_packet handles both and
+        # keeps the base frame-aligned.
+        _, stereo_wmps = self._out_packet(2)
         # altset1 stereo (host default), altset2 N-ch (the bridge).
         self._streaming_altset(cfg, iface=1, terminal_link=2, ep_addr=out_ep,
                                alt=1, ch=2, chcfg=self.CHCFG_STEREO,
-                               max_packet_size=max_packet_size, feedback_ep=fb_ep)
+                               max_packet_size=stereo_wmps, feedback_ep=fb_ep)
         if n > 2:
+            _, nch_wmps = self._out_packet(n)
             self._streaming_altset(cfg, iface=1, terminal_link=2, ep_addr=out_ep,
                                    alt=2, ch=n, chcfg=self.CHCFG_DISCRETE,
-                                   max_packet_size=max_packet_size, feedback_ep=fb_ep)
+                                   max_packet_size=nch_wmps, feedback_ep=fb_ep)
 
     # ---- IF2 capture (device → host) -------------------------------------
     def _streaming_in(self, cfg, n: int, max_packet_size: int):

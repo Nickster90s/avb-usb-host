@@ -44,9 +44,10 @@ from amlib.io.i2s                     import I2STransmitter
 class USBLoopbackUTMI(Elaboratable):
     """8ch UAC2 loopback device, ULPI link via ultraembedded wrapper."""
 
-    NUMBER_OF_CHANNELS = 8
+    NUMBER_OF_CHANNELS = 48      # 96k/32-bit branch: 2ch (alt1) + 48ch (alt2) OUT
     AUDIO_BITS         = 32      # 96k/32-bit branch (was 24)
-    MAX_PACKET_SIZE    = 224
+    MAX_PACKET_SIZE    = 224     # used for the (inert) capture EP only; OUT EP is
+                                 # sized to the high-bandwidth base below
 
     def elaborate(self, platform):
         m = Module()
@@ -179,8 +180,12 @@ class USBLoopbackUTMI(Elaboratable):
         uac2_handler = UAC2RequestHandlers()
         control_ep.add_request_handler(uac2_handler)
 
+        # OUT endpoint per-transaction size = the high-bandwidth base for the
+        # largest (N-ch) altset, so the host's 3-transaction microframes are
+        # accepted. _out_packet returns (endpoint_base, descriptor_wMaxPacketSize).
+        out_base, _ = USBDescriptors._out_packet(desc_ch)
         ep1_out = USBIsochronousOutStreamEndpoint(
-            endpoint_number=1, max_packet_size=self.MAX_PACKET_SIZE)
+            endpoint_number=1, max_packet_size=out_base)
         usb.add_endpoint(ep1_out)
         ep1_in = USBIsochronousInMemoryEndpoint(
             endpoint_number=1, max_packet_size=4)
