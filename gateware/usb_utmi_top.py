@@ -45,7 +45,7 @@ class USBLoopbackUTMI(Elaboratable):
     """8ch UAC2 loopback device, ULPI link via ultraembedded wrapper."""
 
     NUMBER_OF_CHANNELS = 8
-    AUDIO_BITS         = 24
+    AUDIO_BITS         = 32      # 96k/32-bit branch (was 24)
     MAX_PACKET_SIZE    = 224
 
     def elaborate(self, platform):
@@ -194,7 +194,7 @@ class USBLoopbackUTMI(Elaboratable):
         # a usb->sync crossing between two different 60 MHz clocks, which made the
         # DAC path placement-fragile (intermittent no-audio / bleed / glitches).
         m.submodules.out2ch = out2ch = DomainRenamer("usb")(USBStreamToChannels(
-            max_no_channels=self.NUMBER_OF_CHANNELS))
+            max_no_channels=self.NUMBER_OF_CHANNELS, sample_width=self.AUDIO_BITS))
         # CRITICAL: no_channels_in MUST match the host's ACTIVE output altset, or
         # the decoder mis-frames. Linux/aplay picks altset 1 (2ch); macOS picks
         # altset 2 (the 8ch native format) and streams 8 channels. Hardcoding 2
@@ -210,7 +210,7 @@ class USBLoopbackUTMI(Elaboratable):
         ]
 
         m.submodules.ch2in = ch2in = DomainRenamer("usb")(ChannelsToUSBStream(
-            max_nr_channels=self.NUMBER_OF_CHANNELS))
+            max_nr_channels=self.NUMBER_OF_CHANNELS, sample_width=self.AUDIO_BITS))
         m.d.comb += [
             ch2in.channel_stream_in.stream_eq(out2ch.channel_stream_out),
             ep2_in.stream.stream_eq(ch2in.usb_stream_out),
@@ -245,7 +245,7 @@ class USBLoopbackUTMI(Elaboratable):
         # It snoops passively, so a modest FIFO is fine — the elastic buffer is the
         # AsyncFIFO below.
         m.submodules.dac_ext = dac_ext = DomainRenamer("usb")(StereoPairExtractor(
-            self.NUMBER_OF_CHANNELS, fifo_depth=16))
+            self.NUMBER_OF_CHANNELS, fifo_depth=16, sample_width=self.AUDIO_BITS))
         m.d.comb += [
             dac_ext.selected_channel_in.eq(0),
             dac_ext.channel_stream_in.valid.eq(
@@ -254,13 +254,13 @@ class USBLoopbackUTMI(Elaboratable):
             dac_ext.channel_stream_in.channel_nr.eq(out2ch.channel_stream_out.channel_nr),
         ]
 
-        # Assemble L/R pairs (extractor first=L, last=R) into one 48-bit entry so
-        # both channels of a frame come from the SAME FIFO slot (no inter-channel
-        # skew), and push into the usb->audio elastic AsyncFIFO.
+        # Assemble L/R pairs (extractor first=L, last=R) into one 64-bit entry
+        # (2 x 32-bit) so both channels of a frame come from the SAME FIFO slot
+        # (no inter-channel skew), and push into the usb->audio elastic AsyncFIFO.
         m.submodules.dac_fifo = dac_fifo = AsyncFIFO(
-            width=48, depth=1024, w_domain="usb", r_domain="audio")
+            width=2*self.AUDIO_BITS, depth=1024, w_domain="usb", r_domain="audio")
         cs = dac_ext.channel_stream_out
-        pair_l = Signal(24)
+        pair_l = Signal(self.AUDIO_BITS)
         have_l = Signal()
         m.d.comb += cs.ready.eq(1)            # always drain the extractor
         with m.If(cs.valid):
@@ -304,9 +304,14 @@ class USBLoopbackUTMI(Elaboratable):
                 dac_tx.audio_valid.eq(1),
             ]
         else:
+            # CleanI2STx is 24-bit (a 32-BCK I2S slot with the 1-bit Philips
+            # delay fits 31 data bits; the DAC resolves ~24). The USB path and
+            # the FIFO carry the FULL 32-bit sample (bit-perfect over USB);
+            # only the local monitor DAC takes the top 24 bits of each channel.
+            #   L = bits [0:32],  R = bits [32:64];  top 24 = [8:32] / [40:64].
             m.d.comb += [
-                dac_tx.audio_l.eq(dac_fifo.r_data[0:24]),
-                dac_tx.audio_r.eq(dac_fifo.r_data[24:48]),
+                dac_tx.audio_l.eq(dac_fifo.r_data[8:32]),
+                dac_tx.audio_r.eq(dac_fifo.r_data[40:64]),
                 dac_tx.audio_valid.eq(dac_fifo.r_rdy & primed),
                 dac_fifo.r_en.eq(dac_tx.audio_ready),
             ]
@@ -336,8 +341,10 @@ class USBLoopbackUTMI(Elaboratable):
         m.d.usb += audio_div_p.eq(audio_div_usb)
         audio_tick = Signal()
         m.d.comb += audio_tick.eq(audio_div_usb ^ audio_div_p)
-        fb            = Signal(32, reset=0x60000)
-        audio_counter = Signal(19)
+        fb            = Signal(32, reset=0xC0000)   # 96k nominal = 12.0 samp/uframe
+        # cd_audio ticks over 256 uframes: 48k=12.245MHz->~391837 (19 bits);
+        # 96k=24.49MHz->~783673 (needs 20 bits). Widened for 96k.
+        audio_counter = Signal(20)
         sof_counter   = Signal(8)
         with m.If(audio_tick):
             m.d.usb += audio_counter.eq(audio_counter + 1)

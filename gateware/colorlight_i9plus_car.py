@@ -92,11 +92,11 @@ class ColorlightI9PlusCAR(Elaboratable):
             p_CLKOUT1_PHASE   = 0.0,
             p_CLKOUT1_DUTY_CYCLE = 0.5,
 
-            # 1200 / 98 = 12.245 MHz ≈ 256 × 47.8 kHz — the I2S DAC clock. Slight
-            # (0.35%) offset from 12.288 MHz is fine for a monitor: BCK = /4,
-            # LRCK = /256 are derived as pure integer divides → clean, exactly
-            # 32 BCK/channel (the DAC needs a clean BCK, not exact fs).
-            p_CLKOUT2_DIVIDE  = 98,
+            # 1200 / 49 = 24.49 MHz ≈ 256 × 95.66 kHz — the I2S DAC clock for
+            # 96 kHz. Same 0.35% offset from 24.576 MHz as the 48 kHz build
+            # (was DIVIDE=98 → 12.245 MHz); the async feedback servo absorbs it.
+            # BCK = /4, LRCK = /256 stay pure integer divides → 32 BCK/channel.
+            p_CLKOUT2_DIVIDE  = 49,
             p_CLKOUT2_PHASE   = 0.0,
             p_CLKOUT2_DUTY_CYCLE = 0.5,
 

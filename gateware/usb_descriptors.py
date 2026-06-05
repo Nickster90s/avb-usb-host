@@ -51,7 +51,7 @@ class USBDescriptors():
     # AAF 32-bit INT. Bump BIT_RESOLUTION to 32 if/when the FIFO carries
     # full 32-bit samples.
     SUBSLOT_SIZE   = 4
-    BIT_RESOLUTION = 24
+    BIT_RESOLUTION = 32      # 96k/32-bit branch (was 24); full 32-bit subslot
 
     # UAC2 bmChannelConfig spatial masks. FL+FR for the stereo
     # compatibility alt-setting; 0 (discrete / "raw" channels) for the

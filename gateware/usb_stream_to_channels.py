@@ -4,22 +4,32 @@ from amaranth.build   import Platform
 from amlib.stream     import StreamInterface
 
 class USBStreamToChannels(Elaboratable):
-    def __init__(self, max_no_channels=2):
+    def __init__(self, max_no_channels=2, sample_width=24):
         # parameters
+        assert sample_width in (24, 32)
         self._max_nr_channels = max_no_channels
         self._channel_bits    = Shape.cast(range(max_no_channels)).width
+        self._sample_width    = sample_width
 
         # ports
         self.no_channels_in          = Signal(self._channel_bits + 1)
         self.usb_stream_in           = StreamInterface()
-        self.channel_stream_out      = StreamInterface(payload_width=24, extra_fields=[("channel_nr", self._channel_bits)])
+        self.channel_stream_out      = StreamInterface(payload_width=sample_width, extra_fields=[("channel_nr", self._channel_bits)])
         self.garbage_seen_out        = Signal()
 
     def elaborate(self, platform: Platform) -> Module:
         m = Module()
 
         out_channel_nr   = Signal(self._channel_bits)
-        out_sample       = Signal(16)
+        # out_sample accumulates the first (sample_width-8) bits; the last byte
+        # (B3) is concatenated on the MSB end to form the full payload.
+        out_sample       = Signal(self._sample_width - 8)
+        # byte-offset of each USB byte within the sample. 4-byte (S32) subslot:
+        #  24-bit: byte0 is the zero LSB pad -> DISCARDED; bytes 1..3 = 24 valid bits.
+        #  32-bit: all 4 bytes are valid (byte0 = real LSB).
+        wide = (self._sample_width == 32)
+        b1_lo = 8 if wide else 0
+        b2_lo = 16 if wide else 8
         usb_valid        = Signal()
         usb_first        = Signal()
         usb_payload      = Signal(8)
@@ -49,6 +59,9 @@ class USBStreamToChannels(Elaboratable):
                         m.d.sync += out_channel_nr.eq(0)
                     with m.Else():
                         m.d.sync += out_channel_nr.eq(out_channel_nr + 1)
+                    # 32-bit: byte0 is the real LSB -> keep it. 24-bit: discard.
+                    if wide:
+                        m.d.sync += out_sample[:8].eq(usb_payload)
                     m.next = "B1"
 
                 with m.State("B1"):
@@ -57,7 +70,7 @@ class USBStreamToChannels(Elaboratable):
                         m.d.comb += self.garbage_seen_out.eq(1)
                         m.next = "B1"
                     with m.Else():
-                        m.d.sync += out_sample[:8].eq(usb_payload)
+                        m.d.sync += out_sample[b1_lo:b1_lo+8].eq(usb_payload)
                         m.next = "B2"
 
                 with m.State("B2"):
@@ -66,7 +79,7 @@ class USBStreamToChannels(Elaboratable):
                         m.d.comb += self.garbage_seen_out.eq(1)
                         m.next = "B1"
                     with m.Else():
-                        m.d.sync += out_sample[8:16].eq(usb_payload)
+                        m.d.sync += out_sample[b2_lo:b2_lo+8].eq(usb_payload)
                         m.next = "B3"
 
                 with m.State("B3"):

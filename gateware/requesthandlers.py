@@ -81,7 +81,7 @@ class UAC2RequestHandlers(USBRequestHandler):
         request_clock_valid    = clock_valid    & setup.is_in_request
 
         SRATE_44_1k = Const(44100, 32)
-        SRATE_48k   = Const(48000, 32)
+        SRATE_48k   = Const(96000, 32)   # 96k/32-bit branch (name kept; value 96000)
         ZERO        = Const(0, 32)
 
         with m.Elif(setup.type == USBRequestType.CLASS):
@@ -116,7 +116,7 @@ class UAC2RequestHandlers(USBRequestHandler):
                     m.d.comb += transmitter.stream.attach(self.interface.tx)
                     with m.If(request_clock_freq & (setup.length == 4)):
                         m.d.comb += [
-                            Cat(transmitter.data[0:4]).eq(Const(48000, 32)),
+                            Cat(transmitter.data[0:4]).eq(Const(96000, 32)),
                             transmitter.max_length.eq(4)
                         ]
                     with m.Elif(request_clock_valid & (setup.length == 1)):

@@ -4,21 +4,22 @@ from amaranth.lib.fifo import SyncFIFOBuffered
 from amlib.stream import StreamInterface, connect_fifo_to_stream
 
 class StereoPairExtractor(Elaboratable):
-    def __init__(self, max_no_channels: int, fifo_depth):
+    def __init__(self, max_no_channels: int, fifo_depth, sample_width=24):
         self._channel_bits    = Shape.cast(range(max_no_channels)).width
         self._fifo_depth      = fifo_depth
+        self._sample_width    = sample_width
 
         # I/O
-        self.channel_stream_in   = StreamInterface(name="channel_stream_in", payload_width=24, extra_fields=[("channel_nr", self._channel_bits)])
+        self.channel_stream_in   = StreamInterface(name="channel_stream_in", payload_width=sample_width, extra_fields=[("channel_nr", self._channel_bits)])
         self.selected_channel_in = Signal(range(max_no_channels))
         # the first=left and last=right signals mark the channel on the output stream
-        self.channel_stream_out  = StreamInterface(name="channel_stream_out", payload_width=24)
+        self.channel_stream_out  = StreamInterface(name="channel_stream_out", payload_width=sample_width)
         self.level = Signal(range(fifo_depth))
 
     def elaborate(self, platform: Platform) -> Module:
         m = Module()
 
-        m.submodules.fifo = fifo = SyncFIFOBuffered(width=24+1, depth=self._fifo_depth)
+        m.submodules.fifo = fifo = SyncFIFOBuffered(width=self._sample_width+1, depth=self._fifo_depth)
 
         in_channel_nr  = self.channel_stream_in.channel_nr
         out_channel_nr = Signal(self._channel_bits)
