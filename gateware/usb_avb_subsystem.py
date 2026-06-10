@@ -22,7 +22,7 @@
 import os
 from amaranth import (Module, Signal, Elaboratable, Instance, ClockSignal,
                       ResetSignal, ClockDomain, Cat, Const, DomainRenamer,
-                      signed)
+                      EnableInserter, Mux, signed)
 from amaranth.lib.fifo import AsyncFIFO
 from amaranth.lib.cdc  import FFSynchronizer
 from amlib.utils       import EdgeToPulse
@@ -190,7 +190,8 @@ class USBAVBSubsystem(Elaboratable):
             lambda setup: (setup.type    == USBRequestType.STANDARD)
                         & (setup.request == USBStandardRequests.SET_INTERFACE)
         ])
-        control_ep.add_request_handler(UAC2RequestHandlers())
+        uac2_handler = UAC2RequestHandlers()
+        control_ep.add_request_handler(uac2_handler)
 
         ep1_out = USBIsochronousOutStreamEndpoint(
             endpoint_number=1, max_packet_size=self.MAX_PACKET_SIZE)
@@ -211,7 +212,8 @@ class USBAVBSubsystem(Elaboratable):
         # EP->decoder->bridge-write are one clean cd_usb chain; the AsyncFIFO is
         # then the ONLY (proper) cd_usb->sys crossing.
         m.submodules.out2ch = out2ch = DomainRenamer("usb")(
-            USBStreamToChannels(max_no_channels=self.NUMBER_OF_CHANNELS))
+            USBStreamToChannels(max_no_channels=self.NUMBER_OF_CHANNELS,
+                                sample_width=self.AUDIO_BITS))   # true 32-bit
         # Connect the EP stream to the decoder, but DO NOT pass usb_first. The EP
         # boundary detector's `first` (USB packet/transaction start) is NOT
         # 4-byte/sample-aligned on the real host stream, so USBStreamToChannels'
@@ -237,7 +239,11 @@ class USBAVBSubsystem(Elaboratable):
         # ~14x too many frames, ring pins full). Set to the host's ACTIVE channel
         # count. Today the host streams 2ch (the 8ch altset won't enumerate, see
         # the UAC2 8ch-terminal descriptor TODO); set 8 here once that's fixed.
-        m.d.comb += out2ch.no_channels_in.eq(2)
+        # Single 8ch OUT altset (altset1): no stereo fallback, so the decoder
+        # always frames N=8 channels. n_active is a constant used by the re-frame
+        # counter below so its wrap matches no_channels_in.
+        n_active = self.NUMBER_OF_CHANNELS
+        m.d.comb += out2ch.no_channels_in.eq(n_active)
 
         cs = out2ch.channel_stream_out
 
@@ -272,18 +278,18 @@ class USBAVBSubsystem(Elaboratable):
         # channel count (matches no_channels_in). The sample DATA (cs.payload) is
         # used in emission order; phase may be offset by the decoder's start
         # (cosmetic channel rotation), fixable with a one-shot start resync later.
-        N_ACTIVE = 2
+        # Re-frame counter wraps at the ACTIVE channel count (tracks the host
+        # altset, same as no_channels_in) so the AAF framing matches the host too.
         fr_ch = Signal(range(self.NUMBER_OF_CHANNELS))
         with m.If(cs.valid):
-            with m.If(fr_ch == N_ACTIVE - 1):
+            with m.If(fr_ch == n_active - 1):
                 m.d.usb += fr_ch.eq(0)
             with m.Else():
                 m.d.usb += fr_ch.eq(fr_ch + 1)
         fr_first = Signal()
         m.d.comb += fr_first.eq(fr_ch == 0)
         w_word = Cat(
-            Const(0, 8),         # bits  0..7  : zero pad
-            cs.payload[:24],     # bits  8..31 : 24-bit audio, MSB-aligned
+            cs.payload[:32],     # bits  0..31 : full 32-bit audio (byte0 = real LSB)
             fr_ch,               # bits 32..34 : channel (free-running mod N)
             fr_first,            # bit  35     : first (1 per N samples)
             Const(0, 28),        # bits 36..63

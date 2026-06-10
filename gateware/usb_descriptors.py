@@ -51,7 +51,7 @@ class USBDescriptors():
     # AAF 32-bit INT. Bump BIT_RESOLUTION to 32 if/when the FIFO carries
     # full 32-bit samples.
     SUBSLOT_SIZE   = 4
-    BIT_RESOLUTION = 24
+    BIT_RESOLUTION = 32      # true 32-bit subslot (8ch/48K/32B)
 
     # UAC2 bmChannelConfig spatial masks. FL+FR for the stereo
     # compatibility alt-setting; 0 (discrete / "raw" channels) for the
@@ -228,14 +228,11 @@ class USBDescriptors():
 
         out_ep = USBDirection.OUT.to_endpoint_address(1)   # EP 0x01
         fb_ep  = USBDirection.IN.to_endpoint_address(1)    # EP 0x81 feedback
-        # altset1 stereo (host default), altset2 N-ch (the bridge).
+        # SINGLE operational altset: altset1 = N-ch (8ch), no stereo fallback.
+        # The host therefore has exactly one streaming choice — the 8ch bridge.
         self._streaming_altset(cfg, iface=1, terminal_link=2, ep_addr=out_ep,
-                               alt=1, ch=2, chcfg=self.CHCFG_STEREO,
+                               alt=1, ch=n, chcfg=self.CHCFG_DISCRETE,
                                max_packet_size=max_packet_size, feedback_ep=fb_ep)
-        if n > 2:
-            self._streaming_altset(cfg, iface=1, terminal_link=2, ep_addr=out_ep,
-                                   alt=2, ch=n, chcfg=self.CHCFG_DISCRETE,
-                                   max_packet_size=max_packet_size, feedback_ep=fb_ep)
 
     # ---- IF2 capture (device → host) -------------------------------------
     def _streaming_in(self, cfg, n: int, max_packet_size: int):
