@@ -227,12 +227,15 @@ class USBAVBSubsystem(Elaboratable):
         # one sample early (channels emit 1,0,1,0.. for 2ch) — a cosmetic phase
         # offset (L/R swap); a one-shot start-of-stream resync can fix the phase
         # later if needed. usb_last is unused by the decoder.
-        m.d.comb += [
-            out2ch.usb_stream_in.valid.eq(ep1_out.stream.valid),
-            out2ch.usb_stream_in.payload.eq(ep1_out.stream.payload),
-            out2ch.usb_stream_in.first.eq(0),     # free-run channels; no packet resync
-            ep1_out.stream.ready.eq(out2ch.usb_stream_in.ready),
-        ]
+        # ANCHORED framing (port of usb-dac-96K32B, which runs clean on macOS+Linux):
+        # PASS usb_first so the decoder RE-ALIGNS its channel counter to each packet
+        # boundary instead of free-running from an arbitrary start phase. The OUT
+        # endpoint delivers whole frames (MAX_PACKET_SIZE 224 = 7x32B for 8ch/32-bit,
+        # i.e. the frame-aligned base _out_packet would compute), so usb_first lands
+        # on a frame edge. The old usb_first=0 free-run made channel identity a
+        # startup lottery -> AAF ch1 landed on the wrong source channel, and the
+        # phase could drift -> drops. stream_eq forwards valid/payload/first/last+ready.
+        m.d.comb += out2ch.usb_stream_in.stream_eq(ep1_out.stream)
         # CRITICAL: drive no_channels_in or the decoder mis-frames and FLOODS the
         # bridge (last_channel = no_channels_in-1 = -1 if undriven -> the channel
         # counter never wraps cleanly -> cs.first fires on the wrong cadence ->
@@ -268,30 +271,19 @@ class USBAVBSubsystem(Elaboratable):
         # int32 with zero further shifting. When USBStreamToChannels is
         # later upgraded to payload_width=32, the same wiring still works
         # (just no zero-pad LSBs).
-        # DETERMINISTIC framing: re-derive channel + first from a free-running
-        # modulo-N counter on cs.valid, IGNORING the decoder's cs.channel_nr/
-        # cs.first. The decoder's first marking is unreliable on the real stream
-        # (on-HW 64% even with usb_first=0 — residual desync/drops), which
-        # over-pressures the SRC ring (push attempts > consumption -> never
-        # centres). Counting emitted samples mod N gives EXACTLY one first per
-        # frame (50% for 2ch) no matter what the decoder marks. N = the active
-        # channel count (matches no_channels_in). The sample DATA (cs.payload) is
-        # used in emission order; phase may be offset by the decoder's start
-        # (cosmetic channel rotation), fixable with a one-shot start resync later.
-        # Re-frame counter wraps at the ACTIVE channel count (tracks the host
-        # altset, same as no_channels_in) so the AAF framing matches the host too.
-        fr_ch = Signal(range(self.NUMBER_OF_CHANNELS))
-        with m.If(cs.valid):
-            with m.If(fr_ch == n_active - 1):
-                m.d.usb += fr_ch.eq(0)
-            with m.Else():
-                m.d.usb += fr_ch.eq(fr_ch + 1)
-        fr_first = Signal()
-        m.d.comb += fr_first.eq(fr_ch == 0)
+        # ANCHORED channel id (port of usb-dac-96K32B's StereoPairExtractor model):
+        # use the DECODER's channel_nr + first DIRECTLY. Now that usb_first is passed
+        # (above), the decoder's framing is re-anchored to each packet boundary, so
+        # channel_nr is the TRUE channel (0..7) and cs.first marks channel 0 = frame
+        # start. This replaces the old free-running mod-N counter, whose arbitrary
+        # start phase rotated the channels (AAF ch1 on the wrong source channel) and
+        # could drift -> drops. (The old code ignored channel_nr because with
+        # usb_first=0 it was as un-anchored as the counter; the anchor is what makes
+        # it trustworthy now — same reason the DAC could use it and stay clean.)
         w_word = Cat(
             cs.payload[:32],     # bits  0..31 : full 32-bit audio (byte0 = real LSB)
-            fr_ch,               # bits 32..34 : channel (free-running mod N)
-            fr_first,            # bit  35     : first (1 per N samples)
+            cs.channel_nr,       # bits 32..34 : channel (decoder, anchored)
+            cs.first,            # bit  35     : first (decoder frame start, anchored)
             Const(0, 28),        # bits 36..63
         )
 
