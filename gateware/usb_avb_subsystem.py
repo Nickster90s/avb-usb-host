@@ -271,19 +271,28 @@ class USBAVBSubsystem(Elaboratable):
         # int32 with zero further shifting. When USBStreamToChannels is
         # later upgraded to payload_width=32, the same wiring still works
         # (just no zero-pad LSBs).
-        # ANCHORED channel id (port of usb-dac-96K32B's StereoPairExtractor model):
-        # use the DECODER's channel_nr + first DIRECTLY. Now that usb_first is passed
-        # (above), the decoder's framing is re-anchored to each packet boundary, so
-        # channel_nr is the TRUE channel (0..7) and cs.first marks channel 0 = frame
-        # start. This replaces the old free-running mod-N counter, whose arbitrary
-        # start phase rotated the channels (AAF ch1 on the wrong source channel) and
-        # could drift -> drops. (The old code ignored channel_nr because with
-        # usb_first=0 it was as un-anchored as the counter; the anchor is what makes
-        # it trustworthy now — same reason the DAC could use it and stay clean.)
+        # PASSTHROUGH — no channel mapping. The samples already arrive interleaved
+        # ch0..ch7, so the channel of each sample is simply its ARRIVAL POSITION
+        # since the frame start. Count cs.valid, reset to 0 at cs.first (the
+        # packet-anchored frame boundary from usb_first above). We deliberately do
+        # NOT use the decoder's channel_nr TAG: that tag was mis-computed for some
+        # channels and scrambled ch1/3/5 (measured ~6 dB SNR vs ~90 dB on the clean
+        # ones). Position-from-arrival IS the true channel and cannot be mislabeled.
+        seq    = Signal(range(self.NUMBER_OF_CHANNELS))   # position of the NEXT sample
+        cur_ch = Signal(range(self.NUMBER_OF_CHANNELS))   # position of THIS sample
+        with m.If(cs.first):
+            m.d.comb += cur_ch.eq(0)
+        with m.Else():
+            m.d.comb += cur_ch.eq(seq)
+        with m.If(cs.valid):
+            with m.If(cs.first):
+                m.d.usb += seq.eq(1)
+            with m.Else():
+                m.d.usb += seq.eq(seq + 1)
         w_word = Cat(
             cs.payload[:32],     # bits  0..31 : full 32-bit audio (byte0 = real LSB)
-            cs.channel_nr,       # bits 32..34 : channel (decoder, anchored)
-            cs.first,            # bit  35     : first (decoder frame start, anchored)
+            cur_ch,              # bits 32..34 : channel = arrival position (anchored)
+            cs.first,            # bit  35     : first (frame start = position 0)
             Const(0, 28),        # bits 36..63
         )
 
