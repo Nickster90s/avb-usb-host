@@ -342,8 +342,8 @@ class USBAVBSubsystem(Elaboratable):
             bridge_fifo.r_en    .eq(self.sample_pop & bridge_fifo.r_rdy),
         ]
 
-        # EP1 IN async feedback — PI servo on the SRC-ring level, ported from
-        # usb-dac-96K32B (HW-verified glitch-free). Computed in the usb domain
+        # EP1 IN async feedback — PROPORTIONAL honest-measured (usb-dac-96K32B
+        # final, HW-verified glitch-free). Computed in the usb domain
         # (usb.sof_detected) and updated ONCE per 256 µframes (~32 ms) so the
         # reported rate is smooth and never fights the host's own servo.
         #
@@ -373,64 +373,50 @@ class USBAVBSubsystem(Elaboratable):
         sof_counter   = Signal(8)
         fb_value      = Signal(32, reset=0x0006_0000)
 
-        # PI servo on the ring level (constants as the proven usb-dac-96K32B).
-        # block_level (from avb_soc) = ring_level>>2 (0..128); >>1 more → 0..64,
-        # so CENTER=32 ⇒ block_level 64 ⇒ ring 256 = mid of the 512-deep ring —
-        # matching the DAC's w_level>>4 (1024→64) range so KP/clamps carry over.
-        CENTER    = 32
-        KP        = 128
-        INT_CLAMP = 1024
-        CORR_MAX  = 1500                     # ±0.38 % of the ~0x60000 base
-        level_b = Signal(7)
+        # PROPORTIONAL honest-measured feedback — the FINAL usb-dac-96K32B design
+        # (HW-verified glitch-free DAC). The PI / 256-SOF / ±0.38% version this
+        # REPLACES is what oscillated the FIFO full and whose ±0.38% trim could
+        # NOT drain the host's ~2% over-delivery -> the AAF ring sat empty ->
+        # glisses. Per the DAC's own findings:
+        #   - nco_rate = AVERAGED NCO strobes per 256-SOF window. The host slaves
+        #     to this honest consume rate (smunaut model), so it's already
+        #     rate-matched without any trim.
+        #   - err<<6 = a GENTLE ±~1% proportional centring trim toward mid-depth.
+        #     NO integral (the integral wound up and pinned the FIFO).
+        #   - fb_value refreshes every 8 SOFs (~1 ms = host poll period) so the
+        #     centring loop is fast + critically damped; the 32 ms PI update was
+        #     underdamped and oscillated.
+        #   - clamp inside Linux's accept window [freqn-freqn/8, freqmax] so the
+        #     host never rejects a value and strands at a stale (over-)rate.
+        # block_level (from avb_soc) = ring_level>>5 -> 0..128; CENTRE=64 -> ring
+        # mid (2048 of 4096). No firmware servo, so it can't run away.
+        CENTRE  = 64
         err     = Signal(signed(9))
-        integ   = Signal(signed(16))
-        new_i   = Signal(signed(17))
-        corr    = Signal(signed(24))
-        corr_c  = Signal(signed(20))
-        m.d.comb += [
-            level_b.eq(level_usb >> 1),
-            err.eq(CENTER - level_b),
-            new_i.eq(integ + err),          # integral candidate (pre anti-windup)
-            corr.eq(err * KP + integ),      # P + I
-        ]
-        with m.If(corr > CORR_MAX):
-            m.d.comb += corr_c.eq(CORR_MAX)
-        with m.Elif(corr < -CORR_MAX):
-            m.d.comb += corr_c.eq(-CORR_MAX)
-        with m.Else():
-            m.d.comb += corr_c.eq(corr)
-
-        # Final safety clamp to the host's accept window: Linux snd-usb-audio
-        # REJECTS feedback outside [freqn−freqn/8, freqmax] and strands at a
-        # stale rate, so a glitched strobe count must never escape the window.
+        m.d.comb += err.eq(CENTRE - level_usb)
         NOMINAL = 0x0006_0000
         FB_LO   = NOMINAL - 0x8000           # 0x58000
         FB_HI   = NOMINAL + 0x8000           # 0x68000
-        fb_raw  = Signal(signed(34))
-        m.d.comb += fb_raw.eq((clock_counter << 8) + corr_c)
+        nco_rate = Signal(20, reset=1536)    # held NCO strobes/256-SOF (48k -> 1536)
+        fb_new   = Signal(signed(34))
+        fb_clamp = Signal(32)
+        m.d.comb += fb_new.eq((nco_rate << 8) + (err << 6))
+        with m.If(fb_new < FB_LO):
+            m.d.comb += fb_clamp.eq(FB_LO)
+        with m.Elif(fb_new > FB_HI):
+            m.d.comb += fb_clamp.eq(FB_HI)
+        with m.Else():
+            m.d.comb += fb_clamp.eq(fb_new)
 
         with m.If(strobe_tick):
             m.d.usb += clock_counter.eq(clock_counter + 1)
         with m.If(usb.sof_detected):
             m.d.usb += sof_counter.eq(sof_counter + 1)
-            # ONE update per 256 µframes (~32 ms): advance the integral with
-            # anti-windup, latch fb = measured-base + PI-correction (final
-            # clamped), and reset the window (carry the live strobe tick). The
-            # slow cadence + tiny clamp keep the host's reported rate smooth.
+            # Every 256 SOFs: latch the averaged NCO rate (the honest base), reset.
             with m.If(sof_counter == 0):
-                with m.If(new_i > INT_CLAMP):
-                    m.d.usb += integ.eq(INT_CLAMP)
-                with m.Elif(new_i < -INT_CLAMP):
-                    m.d.usb += integ.eq(-INT_CLAMP)
-                with m.Else():
-                    m.d.usb += integ.eq(new_i)
-                with m.If(fb_raw < FB_LO):
-                    m.d.usb += fb_value.eq(FB_LO)
-                with m.Elif(fb_raw > FB_HI):
-                    m.d.usb += fb_value.eq(FB_HI)
-                with m.Else():
-                    m.d.usb += fb_value.eq(fb_raw)
-                m.d.usb += clock_counter.eq(strobe_tick)
+                m.d.usb += [nco_rate.eq(clock_counter), clock_counter.eq(strobe_tick)]
+            # Every 8 SOFs (~1 ms): refresh reported value = held base + live trim.
+            with m.If(sof_counter[0:3] == 0):
+                m.d.usb += fb_value.eq(fb_clamp)
 
         # Firmware feedback OVERRIDE: when usb_fb_ovr != 0, report that fixed
         # value instead of the measured/centring loop — lets firmware sweep
