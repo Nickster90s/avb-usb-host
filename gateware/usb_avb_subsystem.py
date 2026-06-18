@@ -39,15 +39,22 @@ from usb_stream_to_channels          import USBStreamToChannels
 
 
 class USBAVBSubsystem(Elaboratable):
-    NUMBER_OF_CHANNELS = 8
+    # 48ch bridge (host 48ch/48K/32B -> 6x8ch AAF). The sample_hi channel index
+    # widens 3->6 bit (see w_word / sample_hi docs below).
+    NUMBER_OF_CHANNELS = 48
     # 32-bit container, full bit width. UAC2 S32_LE today carries 24
     # valid bits MSB-aligned (lower 8 = 0); future-true-32-bit and Milan
     # AAF 32-bit INT both bit-compatible. See README §"UAC2 bit depth".
     AUDIO_BITS         = 32
-    MAX_PACKET_SIZE    = 224
-    # Bridge FIFO: cd_usb → sys. Sized for 96 kHz × 8 ch headroom
-    # (384 samples/ms = ~10 USB µframes). One RAMB36 SDP-mode footprint.
-    FIFO_DEPTH         = 1024
+    # OUT ISO endpoint per-transaction buffer (= descriptor wMaxPacketSize base,
+    # frame-multiple). 48ch@48K@32B = 6 samples/uframe * 48 * 4 = 1152 B (7 w/
+    # async +1 jitter = 1344). High-bandwidth iso: base 768 (=4*192 frame) x 2
+    # transactions = 1536 >= 1344. The descriptor encodes mult via wMaxPacketSize
+    # bits 11-12 (usb_descriptors _packet_sizing); this is the per-xact base.
+    MAX_PACKET_SIZE    = 768
+    # Bridge FIFO: cd_usb → sys. 48ch @ 48K = 2304 samples/ms; size for several
+    # high-bandwidth-iso uframes of headroom. 64-bit (lo+hi) entries.
+    FIFO_DEPTH         = 2048
 
     def __init__(self, *, standalone=False):
         self.standalone = standalone
@@ -62,12 +69,12 @@ class USBAVBSubsystem(Elaboratable):
         # Read protocol:
         #   while (sample_readable) {
         #       lo = sample_lo;      # bits  0..31 of head: 32-bit signed payload
-        #       hi = sample_hi;      # bits 32..63: {reserved[28], first[1], channel[3]}
+        #       hi = sample_hi;      # bits 32..63: {reserved[25], first[1], channel[6]}
         #       sample_pop = 1;      # one-cycle strobe to advance
         #   }
         # Head is stable while no pop happens, so lo+hi reads are atomic.
         self.sample_lo              = Signal(32)    # OUT (sys): payload[31:0]
-        self.sample_hi              = Signal(32)    # OUT (sys): {0[28], first, channel[3]}
+        self.sample_hi              = Signal(32)    # OUT (sys): {0[25], first[6], channel[0:6]}
         self.sample_readable        = Signal()      # OUT (sys): FIFO has data
         self.sample_pop             = Signal()      # IN  (sys): advance read ptr
         self.sample_overflow_count  = Signal(32)    # OUT (sys): drops at FIFO full
@@ -291,9 +298,9 @@ class USBAVBSubsystem(Elaboratable):
                 m.d.usb += seq.eq(seq + 1)
         w_word = Cat(
             cs.payload[:32],     # bits  0..31 : full 32-bit audio (byte0 = real LSB)
-            cur_ch,              # bits 32..34 : channel = arrival position (anchored)
-            cs.first,            # bit  35     : first (frame start = position 0)
-            Const(0, 28),        # bits 36..63
+            cur_ch,              # bits 32..37 : channel = arrival position (6-bit, 0..47)
+            cs.first,            # bit  38     : first (frame start = position 0)
+            Const(0, 25),        # bits 39..63
         )
 
         # Write side (cd_usb): push a word per valid+ready beat.

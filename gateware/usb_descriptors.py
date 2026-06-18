@@ -51,7 +51,30 @@ class USBDescriptors():
     # AAF 32-bit INT. Bump BIT_RESOLUTION to 32 if/when the FIFO carries
     # full 32-bit samples.
     SUBSLOT_SIZE   = 4
-    BIT_RESOLUTION = 32      # true 32-bit subslot (8ch/48K/32B)
+    BIT_RESOLUTION = 32      # true 32-bit subslot (48ch/48K/32B)
+    SAMPLE_RATE    = 48000   # used to size wMaxPacketSize / high-bandwidth iso
+
+    # OUT ISO packet sizing -> (endpoint_base, descriptor_wMaxPacketSize).
+    # bytes/uframe = (n*SUBSLOT_SIZE) * (fs/8000 + 1)  (+1 frame = async-feedback
+    # overshoot). Fits one 1024-byte transaction -> single. Otherwise HIGH-
+    # BANDWIDTH iso (2-3 transactions/uframe via the mult bits 11-12 of
+    # wMaxPacketSize). The per-transaction base MUST be a whole multiple of the
+    # sample-frame size (n*SUBSLOT_SIZE) so every transaction starts on a frame
+    # boundary (the decoder keys framing off the per-transaction `first`). For
+    # 48ch@48K@32B: frame=192, total=1344 -> base 768 x 2 transactions = 1536.
+    @classmethod
+    def _out_packet(cls, n: int):
+        frame = n * cls.SUBSLOT_SIZE
+        total = frame * (cls.SAMPLE_RATE // 8000 + 1)
+        if total <= 1024:
+            return total, total
+        for k in (2, 3):
+            base = ((512 // frame) + 1) * frame   # smallest frame-multiple > 512
+            while base <= 1024:
+                if k * base >= total:
+                    return base, base | ((k - 1) << 11)
+                base += frame
+        raise ValueError(f"{total} bytes/uframe exceeds 3x1024 high-bandwidth iso")
 
     # UAC2 bmChannelConfig spatial masks. FL+FR for the stereo
     # compatibility alt-setting; 0 (discrete / "raw" channels) for the
@@ -201,7 +224,10 @@ class USBDescriptors():
         ep.bmAttributes     = (USBTransferType.ISOCHRONOUS
                                | (USBSynchronizationType.ASYNC << 2)
                                | (USBUsageType.DATA << 4))
-        ep.wMaxPacketSize   = max_packet_size
+        # HIGH-BANDWIDTH iso: descriptor wMaxPacketSize encodes the per-transaction
+        # base in bits 0..10 and (transactions-1) in bits 11..12. The EP buffer
+        # (subsystem USBIsochronous*Endpoint max_packet_size) uses the base only.
+        ep.wMaxPacketSize   = self._out_packet(ch)[1]
         ep.bInterval        = 1
         cfg.add_subordinate_descriptor(ep)
 
