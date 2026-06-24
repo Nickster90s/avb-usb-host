@@ -404,9 +404,28 @@ class USBAVBSubsystem(Elaboratable):
         FB_LO   = NOMINAL - 0x8000           # 0x58000
         FB_HI   = NOMINAL + 0x8000           # 0x68000
         nco_rate = Signal(20, reset=1536)    # held NCO strobes/256-SOF (48k -> 1536)
+
+        # CLAMPED INTEGRAL (re-added 2026-06-24). HW-measured via the fb_ovr sweep:
+        # the host honors async feedback but delivers ~0.5% UNDER nominal (ep_out
+        # balances 9,216,000 at fb=+0.52% = 0x60800). Proportional-only had to sit
+        # at a LOW ring level to synthesise that +0.5% trim -> low ring + the ±100
+        # swing dipped below the prime floor -> silence -> underrun climbed forever.
+        # The integral supplies the steady offset so the proportional term can hold
+        # the ring CENTERED. TWO anti-windup guards vs the old integral that pinned
+        # the FIFO: (1) hard clamp to ±INTEG_MAX (~2% authority); (2) conditional
+        # integration — only accumulate when the ring is in the linear band near
+        # center (|err|<=32), so the startup prime (err=64, ring empty) can't wind
+        # it up. Requires block_level un-capped to 0..128 (aaf_packetizer) so err is
+        # SYMMETRIC and the loop can pull a full ring back down.
+        KI_SHIFT  = 6
+        INTEG_MAX = 0x2000 << KI_SHIFT       # ±2.08% of nominal feedback authority
+        integ     = Signal(signed(24))
+        integ_n   = Signal(signed(25))
+        m.d.comb += integ_n.eq(integ + err)
+
         fb_new   = Signal(signed(34))
         fb_clamp = Signal(32)
-        m.d.comb += fb_new.eq((nco_rate << 8) + (err << 6))
+        m.d.comb += fb_new.eq((nco_rate << 8) + (err << 6) + (integ >> KI_SHIFT))
         with m.If(fb_new < FB_LO):
             m.d.comb += fb_clamp.eq(FB_LO)
         with m.Elif(fb_new > FB_HI):
@@ -421,9 +440,19 @@ class USBAVBSubsystem(Elaboratable):
             # Every 256 SOFs: latch the averaged NCO rate (the honest base), reset.
             with m.If(sof_counter == 0):
                 m.d.usb += [nco_rate.eq(clock_counter), clock_counter.eq(strobe_tick)]
-            # Every 8 SOFs (~1 ms): refresh reported value = held base + live trim.
+            # Every 8 SOFs (~1 ms): refresh reported value = held base + P + I trim.
             with m.If(sof_counter[0:3] == 0):
                 m.d.usb += fb_value.eq(fb_clamp)
+                # Conditional + clamped integration (anti-windup): only accumulate
+                # in the linear band near center so the prime transient can't wind
+                # it up, and hard-clamp the accumulator so it can never pin the FIFO.
+                with m.If((err <= 32) & (err >= -32)):
+                    with m.If(integ_n > INTEG_MAX):
+                        m.d.usb += integ.eq(INTEG_MAX)
+                    with m.Elif(integ_n < -INTEG_MAX):
+                        m.d.usb += integ.eq(-INTEG_MAX)
+                    with m.Else():
+                        m.d.usb += integ.eq(integ_n)
 
         # Firmware feedback OVERRIDE: when usb_fb_ovr != 0, report that fixed
         # value instead of the measured/centring loop — lets firmware sweep
