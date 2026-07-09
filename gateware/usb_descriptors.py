@@ -114,7 +114,7 @@ class USBDescriptors():
             d.idVendor           = 0x1209    # pid.codes hobbyist VID
             d.idProduct          = 0xEAB1    # EventsLight AVB bridge
             d.iManufacturer      = "EventsLight"
-            d.iProduct           = "N-Series AVB Switchover"
+            d.iProduct           = "N-Series AVB Switchover Main"
             d.iSerialNumber      = "0"
             d.bcdDevice          = 0.01
             d.bNumConfigurations = 1
