@@ -56,8 +56,13 @@ class USBAVBSubsystem(Elaboratable):
     # high-bandwidth-iso uframes of headroom. 64-bit (lo+hi) entries.
     FIFO_DEPTH         = 2048
 
-    def __init__(self, *, standalone=False):
-        self.standalone = standalone
+    def __init__(self, *, standalone=False,
+                 product_name="N-Series AVB Switchover Main", serial="0"):
+        self.standalone     = standalone
+        # USB device identity — parametrized so a 2nd instance (the A/B
+        # "Backup" ULPI in avb-aes3) enumerates as a distinct interface.
+        self._product_name  = product_name
+        self._serial        = serial
 
         # --- sys-domain audio sample drain interface (host playback) ---
         # An AsyncFIFO inside the subsystem crosses the cd_usb→sys boundary
@@ -189,7 +194,8 @@ class USBAVBSubsystem(Elaboratable):
         usb.always_fs  = False
         usb.data_clock = 60e6
 
-        descriptors     = USBDescriptors(use_ila=False, ila_max_packet_size=512)
+        descriptors     = USBDescriptors(use_ila=False, ila_max_packet_size=512,
+                                         product_name=self._product_name, serial=self._serial)
         usb_descriptors = descriptors.create_usb2_descriptors(
                               self.NUMBER_OF_CHANNELS, self.MAX_PACKET_SIZE)
         control_ep = usb.add_control_endpoint()
@@ -483,8 +489,18 @@ class USBAVBSubsystem(Elaboratable):
 if __name__ == "__main__":
     import sys
     from amaranth.back import verilog
-    sub = USBAVBSubsystem(standalone=True)
-    out = sys.argv[1] if len(sys.argv) > 1 else "usb_avb_subsystem.v"
+    # Usage: usb_avb_subsystem.py [out.v] [main|backup]
+    # backup => distinct Verilog module name (usb_avb_subsystem2, so both can
+    # be add_source'd together) + "Backup" descriptor identity for the 2nd ULPI.
+    out     = sys.argv[1] if len(sys.argv) > 1 else "usb_avb_subsystem.v"
+    variant = sys.argv[2] if len(sys.argv) > 2 else "main"
+    if variant == "backup":
+        modname = "usb_avb_subsystem2"
+        sub = USBAVBSubsystem(standalone=True,
+                              product_name="N-Series AVB Switchover Backup", serial="1")
+    else:
+        modname = "usb_avb_subsystem"
+        sub = USBAVBSubsystem(standalone=True)
     with open(out, "w") as f:
-        f.write(verilog.convert(sub, name="usb_avb_subsystem", ports=sub.ports()))
-    print(f"wrote {out}  (instantiate with ulpi_wrapper.v alongside)")
+        f.write(verilog.convert(sub, name=modname, ports=sub.ports()))
+    print(f"wrote {out}  (module {modname}; instantiate with ulpi_wrapper.v alongside)")

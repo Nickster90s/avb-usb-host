@@ -84,11 +84,14 @@ class USBDescriptors():
     CHCFG_STEREO   = 0x00000003   # Front-Left | Front-Right
     CHCFG_DISCRETE = 0x00000000
 
-    def __init__(self, **_ignored):
+    def __init__(self, *, product_name="N-Series AVB Switchover Main",
+                 serial="0", **_ignored):
         # **_ignored keeps the historical call sites working
         # (USBDescriptors(use_ila=..., ila_max_packet_size=...)); this
-        # device has no ILA.
-        pass
+        # device has no ILA. product_name/serial let a 2nd instance
+        # enumerate as a distinct "Backup" interface.
+        self.product_name = product_name
+        self.serial       = serial
 
     # ---- public entry point (unchanged signature) ------------------------
     def create_usb2_descriptors(self, no_channels: int, max_packet_size: int):
@@ -114,8 +117,8 @@ class USBDescriptors():
             d.idVendor           = 0x1209    # pid.codes hobbyist VID
             d.idProduct          = 0xEAB1    # EventsLight AVB bridge
             d.iManufacturer      = "EventsLight"
-            d.iProduct           = "N-Series AVB Switchover Main"
-            d.iSerialNumber      = "0"
+            d.iProduct           = self.product_name
+            d.iSerialNumber      = self.serial
             d.bcdDevice          = 0.01
             d.bNumConfigurations = 1
 
