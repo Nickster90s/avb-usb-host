@@ -89,6 +89,87 @@ also required for a production-grade product.
 If T3 turns out not to be MRCC/SRCC on this package, swap CLK to T4 or U3
 (also Bank 34 corner — likely clock-capable).
 
+### Backup (2nd) USB3300 ULPI — pinout + PCB requirements
+
+A **second** USB3300 ULPI breakout for a redundant / backup USB host. Bank-34,
+HDMI-safe pinout that matches `avb-aes3` `ulpi_io(USB_BACKUP)` and the
+`USB_BACKUP=1` branch in `gateware/colorlight_i9plus_platform.py`.
+
+| ULPI signal | i9plus pin | SODIMM # | Notes |
+|---|---|---|---|
+| **CLK** (60 MHz IN from PHY) | **V4** | 88 | IO_L12P_T1_**MRCC**_34 — real clock-capable pin (verified in `package_pins.csv`). PLL locks off this. |
+| DIR | R4 | 90 | |
+| NXT | **Y4** | 89 | *see NXT↔RST swap below* — default build puts NXT here |
+| STP | T5 | 92 | |
+| **RST (ACTIVE-HIGH)** | **W4** | 85 | *see swap* — default build puts the static RST here (W4 = clock's diff partner) |
+| DATA0 | Y9 | 117 | |
+| DATA1 | V8 | 119 | |
+| DATA2 | W9 | 121 | |
+| DATA3 | V9 | 123 | |
+| DATA4 | W6 | 104 | |
+| DATA5 | V7 | 110 | |
+| DATA6 | Y3 | 83 | |
+| DATA7 | Y6 | 95 | |
+
+**Build env flags** (all default OFF; set at build time):
+
+- `USB_BACKUP=1` — repin the ULPI block to the backup pinout above.
+- `NXT_W4=1` — restore the *original* mapping (NXT=W4, RST=Y4). The default
+  (unset) mapping is the **swapped** one: NXT=Y4, RST=W4. Reason below.
+- `USB_SWAP_D67=1` — swap D6↔D7 in gateware to cancel a physical Y3↔Y6 cross
+  on the breakout. **Not needed** on the current board (D6=Y3/D7=Y6 is correct);
+  building with it set made the device stop attaching entirely.
+
+**Why NXT and RST are swapped by default:** `W4` (IO_L12N_T1) is the
+*differential partner* of the clock `V4` (IO_L12P_T1_MRCC). A fast-toggling
+signal on the clock's diff partner couples jitter into the 60 MHz CLK. The
+original wiring had **NXT** (toggles every cycle) on W4; swapping it for the
+**static RST** removes the coupling. Both wires already exist on the breakout —
+just swap the two dupont connectors. (The Main breakout has no signal on its
+clock pair, so it never had this issue.)
+
+#### ⚠️ PCB / hardware requirements — learned the hard way
+
+The backup bring-up burned a lot of time chasing gateware ghosts; the **root
+cause was the breakout's crystal**, not the FPGA. On a custom PCB (or when
+picking a breakout) these are mandatory:
+
+1. **Crystal load capacitors are not optional.** The backup breakout's 60 MHz
+   USB3300 reference crystal was *marginal* — it only started oscillating when
+   touched (finger capacitance) and changed behaviour after a reflow. That's the
+   classic signature of missing / wrong / cold-jointed **load caps** (~18–22 pF
+   each crystal pin to GND; match the crystal's specified C_L). This single fault
+   produced every downstream symptom: boot-to-boot variance, warm-works /
+   cold-fails, single register reads OK but descriptor *streaming* → `error-71`.
+2. **The 60 MHz CLKOUT must be alive and stable before the FPGA's USB PLL tries
+   to lock.** On a real cold power-on the USB3300's CLKOUT appears a few ms after
+   power (crystal startup, after the FPGA releases the PHY reset). A free-running
+   PLLE2 with no reset latches *unlocked* on the late clock and never retries →
+   cold boot = dead USB clock = `error-71`. A production design needs a **USB-PLL
+   reset/retry FSM** driven off the always-running 25 MHz crystal (assert reset →
+   wait for PHY clock stable → release → re-pulse if `usb_pll_locked` stays low).
+   Do **not** gate that reset counter on a domain that can stall.
+3. **Prefer a fixed oscillator or a known-good crystal + caps.** If keeping a
+   crystal, match the Main breakout's part and give it proper load caps and short,
+   guarded traces. A reflow's heat can damage a bare crystal — replace if suspect.
+4. **Length-matched ULPI routing.** Same as the Main bus: keep CLK and all 11
+   signals within ~5–10 mm of each other, and keep any switching signal **off**
+   the clock's differential partner net.
+
+**Pass test** (gateware is already proven — this only validates the clock):
+flash `bitstreams/backup-CLKTEST-v4.bit` (headless clock-presence test, blink
+rate on the A18 LED = V4 60 MHz present/absent, no PLL/PHY dependencies). The
+LED must blink **fast and stay fast through a cold power-cycle, untouched**.
+Then the backup enumerates with the normal build.
+
+**Diag tooling** (in `gateware/`): `ulpi_clocktest_top.py` (V4 clock-presence,
+the decisive test), `ulpi_led_diag_top.py` (LED reg-read diag),
+`ulpi_regread_uart_top.py` (headless ULPI reg reader → CH347 UART on R3), and
+their `build_clktest.py` / `build_led.py` / `build_diag.py` drivers. A
+`uart_tx` Resource on **R3** was added so a headless diagnostic can print to the
+user's picocom without a CPU. Baseline backup USB build (ready for once the
+crystal is fixed): `bitstreams/backup-usb_utmi_ph0_READY.bit`.
+
 ### I2S DAC (PCM5102A) → P6 header
 
 | I2S signal | i9plus pin |
@@ -109,7 +190,7 @@ PHY1 (U9): RGMII on L3/M6/H2/G2/G1/R1/N2/N3/P1/P2/N5/M5/M2/N4/P4
 
 After USB (13 pins on P2) and I2S DAC (3 pins on P6), the rest of the user-IO is **untouched**:
 
-- **P2 remaining**: Y3, Y4, Y6, W4, AA3, AB2, AB3 (7 pins)
+- **P2 remaining**: AA3, AB2, AB3 (3 pins). *(Y3, Y4, Y6, W4 are now used by the backup ULPI — see "Backup (2nd) USB3300 ULPI" above. So is V4/R4/T5 and the D-bus on Y9/V8/W9/V9/W6/V7.)*
 - **P3 header**: ~20 pins, Bank 14/15 (V18/V19/V8/V9/W17/W19/Y18/Y19/AA19/AA20/AA21/AB18/AB20/P14/W9/Y9/AA6/R14/AB8 plus rails)
 - **P5 header**: ~16 pins, mix of Bank 14/35 (P15/P16/P17/N13/N14/U17/L5/L6/W5/W6/J5/J6/T5/R4/M3/R3/U4)
 - **P6 remaining** (after I2S): F4, L4, J4, G4, K3, G3, J2, K2, L1, M1, J1, K1, U1, H3, T6, P5 (16 pins)

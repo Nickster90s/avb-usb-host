@@ -59,21 +59,47 @@ def _dimm(n):
 # IO_0_34 (NOT clock-capable). Verified against prjxray-db's
 # package_pins.csv. CLK on T3 silently builds but never clocks the
 # ulpi domain because there's no MRCC/SRCC there to feed a BUFG.
-_ULPI_DIMM = {
-    "clk": 51,   # T4   — IO_L13N_T2_MRCC_34, MRCC (clock-capable)
-    "dir": 49,   # T3   — regular IO, fine for DIR
-    "nxt": 57,   # U2
-    "stp": 59,   # U3
-    "rst": 41,   # R2   — active-LOW per USB3300 datasheet
-    "d0":  61,   # V2
-    "d1":  63,   # V3
-    "d2":  65,   # W1
-    "d3":  73,   # W2
-    "d4":  67,   # Y1
-    "d5":  69,   # AA1
-    "d6":  71,   # AB1
-    "d7":  75,   # Y2
-}
+import os as _os
+if _os.environ.get("USB_BACKUP", "") == "1":
+    # BACKUP ULPI breakout (2nd connector) — bank-34, HDMI-safe pinout matching
+    # avb-aes3 ulpi_io() USB_BACKUP. SODIMM numbers verified against _DIMM_PINS:
+    #   clk V4=88 dir R4=90 nxt W4=85 stp T5=92 rst Y4=89
+    #   d0 Y9=117 d1 V8=119 d2 W9=121 d3 V9=123 d4 W6=104 d5 V7=110 d6 Y3=83 d7 Y6=95
+    _d6, _d7 = 83, 95                          # D6=Y3(83)  D7=Y6(95)
+    if _os.environ.get("USB_SWAP_D67", "") == "1":
+        _d6, _d7 = 95, 83                      # swap in gateware to cancel a
+                                               # physical Y3<->Y6 cross on the breakout
+    # CLOCK-COUPLING FIX: W4 (IO_L12N_T1) is the DIFFERENTIAL PARTNER of the
+    # clock V4 (IO_L12P_T1_MRCC). Originally NXT (fast-toggling) sat on W4 and
+    # coupled into the 60 MHz clock (Main has no signal on its clock pair). SWAP
+    # NXT<->RST: RST is STATIC, so on W4 it can't couple into the clock; NXT
+    # moves to Y4. Both wires already exist on the breakout — just swap the two
+    # dupont connectors (NXT<->RST). Set NXT_W4=1 to build the OLD mapping.
+    if _os.environ.get("NXT_W4", "") == "1":
+        _nxt, _rst = 85, 89          # OLD: nxt=W4, rst=Y4
+    else:
+        _nxt, _rst = 89, 85          # NEW: nxt=Y4, rst=W4 (clock pair = static rst)
+    _ULPI_DIMM = {
+        "clk": 88, "dir": 90, "nxt": _nxt, "stp": 92, "rst": _rst,
+        "d0": 117, "d1": 119, "d2": 121, "d3": 123,
+        "d4": 104, "d5": 110, "d6": _d6,  "d7": _d7,
+    }
+else:
+    _ULPI_DIMM = {
+        "clk": 51,   # T4   — IO_L13N_T2_MRCC_34, MRCC (clock-capable)
+        "dir": 49,   # T3   — regular IO, fine for DIR
+        "nxt": 57,   # U2
+        "stp": 59,   # U3
+        "rst": 41,   # R2   — active-LOW per USB3300 datasheet
+        "d0":  61,   # V2
+        "d1":  63,   # V3
+        "d2":  65,   # W1
+        "d3":  73,   # W2
+        "d4":  67,   # Y1
+        "d5":  69,   # AA1
+        "d6":  71,   # AB1
+        "d7":  75,   # Y2
+    }
 
 
 class ColorlightI9PlusPlatform(XilinxPlatform):
@@ -124,6 +150,11 @@ class ColorlightI9PlusPlatform(XilinxPlatform):
                  Clock(25e6), Attrs(IOSTANDARD="LVCMOS33")),
 
         Resource("user_led", 0, Pins("A18", dir="o"),
+                 Attrs(IOSTANDARD="LVCMOS33")),
+
+        # UART TX to the CH347 (FPGA -> CH347 RXD1 on R3). Lets a headless
+        # gateware diagnostic print to the user's picocom without a CPU.
+        Resource("uart_tx", 0, Pins("R3", dir="o"),
                  Attrs(IOSTANDARD="LVCMOS33")),
 
         # ----- USB HS via external ULPI breakout -----

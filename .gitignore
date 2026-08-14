@@ -7,6 +7,10 @@ __pycache__/
 build/
 build_dac/
 build_dac_utmi/
+build_clktest/
+build_diag/
+build_led/
+build_mainrecipe/
 
 # Editor files
 .vscode/
