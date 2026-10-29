@@ -57,12 +57,16 @@ class USBAVBSubsystem(Elaboratable):
     FIFO_DEPTH         = 2048
 
     def __init__(self, *, standalone=False,
-                 product_name="N-Series AVB Switchover Main", serial="0"):
+                 product_name="N-Series AVB Switchover Main", serial="0",
+                 product_id=0xEAB1):
         self.standalone     = standalone
         # USB device identity — parametrized so a 2nd instance (the A/B
         # "Backup" ULPI in avb-aes3) enumerates as a distinct interface.
+        # Main = 1209:EAB1, Backup = 1209:EAB2, matching avb-usb-host's
+        # dual-PHY build so udev rules and ALSA names carry over unchanged.
         self._product_name  = product_name
         self._serial        = serial
+        self._product_id    = product_id
 
         # --- sys-domain audio sample drain interface (host playback) ---
         # An AsyncFIFO inside the subsystem crosses the cd_usb→sys boundary
@@ -195,7 +199,9 @@ class USBAVBSubsystem(Elaboratable):
         usb.data_clock = 60e6
 
         descriptors     = USBDescriptors(use_ila=False, ila_max_packet_size=512,
-                                         product_name=self._product_name, serial=self._serial)
+                                         product_name=self._product_name,
+                                         serial=self._serial,
+                                         product_id=self._product_id)
         usb_descriptors = descriptors.create_usb2_descriptors(
                               self.NUMBER_OF_CHANNELS, self.MAX_PACKET_SIZE)
         control_ep = usb.add_control_endpoint()
@@ -497,7 +503,8 @@ if __name__ == "__main__":
     if variant == "backup":
         modname = "usb_avb_subsystem2"
         sub = USBAVBSubsystem(standalone=True,
-                              product_name="N-Series AVB Switchover Backup", serial="1")
+                              product_name="N-Series AVB Switchover Backup",
+                              serial="1", product_id=0xEAB2)
     else:
         modname = "usb_avb_subsystem"
         sub = USBAVBSubsystem(standalone=True)
