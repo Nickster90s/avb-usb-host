@@ -3,16 +3,15 @@
 __pycache__/
 *.pyc
 
-# Amaranth/Yosys/nextpnr build outputs
+# Amaranth/Yosys/nextpnr build outputs.
+# One pattern instead of a per-dir list: the ULPI investigation left 148 build
+# dirs totalling 2.2 GB, and each new diagnostic added another. Matches
+# directories only, so gateware/build_*.py driver scripts are still tracked.
 build/
-build_dac/
-build_dac_utmi/
-build_clktest/
-build_diag/
-build_led/
-build_mainrecipe/
+build_*/
 
 # Editor files
 .vscode/
 *.swp
 build_fifotest/
+sweep_*/

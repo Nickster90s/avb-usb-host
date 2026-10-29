@@ -32,7 +32,21 @@ class UlpiRegReadUart(Elaboratable):
         m = Module()
         ulpi = platform.request("ulpi", 0)
         ulpi_clk = platform.request("ulpi_clock", 0)
-        m.submodules.car = platform.clock_domain_generator(ulpi_clk_pin=ulpi_clk.i)
+        # USB_PHASE selects the RX sampling clock (was hard-wired to the -120 PLL
+        # default, tuned for Main's bank-34 pins). "inv"=falling-edge BUFG,
+        # "raw"=posedge BUFG, a number=PLL phase-shift, empty=CAR default.
+        _ph = os.environ.get("USB_PHASE", "")
+        if _ph == "inv":
+            m.submodules.car = platform.clock_domain_generator(
+                ulpi_clk_pin=ulpi_clk.i, usb_pll=False, usb_invert=True)
+        elif _ph == "raw":
+            m.submodules.car = platform.clock_domain_generator(
+                ulpi_clk_pin=ulpi_clk.i, usb_pll=False)
+        elif _ph:
+            m.submodules.car = platform.clock_domain_generator(
+                ulpi_clk_pin=ulpi_clk.i, usb_pll=True, usb_phase=float(_ph))
+        else:
+            m.submodules.car = platform.clock_domain_generator(ulpi_clk_pin=ulpi_clk.i)
         m.d.comb += ulpi.rst.o.eq(0)
 
         # ---- LUNA ULPI register window (usb domain) ----
@@ -57,13 +71,19 @@ class UlpiRegReadUart(Elaboratable):
         res   = Array([Signal(8, name=f"reg{i}") for i in range(len(ADDRS))])
         addr_cur = Signal(6)
         m.d.comb += addr_cur.eq(Array([Const(a) for a in ADDRS])[idx])
+        # HOLD the address the whole transaction: LUNA's ULPIRegisterWindow
+        # drives the command from the LIVE self.address a couple cycles AFTER
+        # the request (START_READ), so a one-cycle pulse leaves it 0 -> every
+        # read hits reg 0 (the old all-0x24 bug). addr_cur is stable (idx only
+        # advances after done), so drive it unconditionally.
+        m.d.comb += rw.address.eq(addr_cur)
 
         with m.FSM(domain="usb"):
             with m.State("IDLE"):
                 with m.If(ready & ~rw.busy):
                     m.next = "READ"
             with m.State("READ"):
-                m.d.comb += [rw.address.eq(addr_cur), rw.read_request.eq(1)]
+                m.d.comb += rw.read_request.eq(1)
                 m.next = "RWAIT"
             with m.State("RWAIT"):
                 with m.If(rw.done):
