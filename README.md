@@ -297,6 +297,93 @@ follows upstream `adat-usb2-audio-interface`
 > project.** Fine on the bench; confirm the allocation before shipping, or set
 > `USB_PID=0xeab1` to put both ports back on one PID.
 
+### BOTH USB3300 PHYs from one bitstream — **enumeration WORKING** (2026-10-29)
+
+```
+Bus 001 Device 028: ID 1209:eab1 N-Series AVB Switchover Main      usb 1-8   480M
+Bus 001 Device 029: ID 1209:eab2 N-Series AVB Switchover Backup    usb 1-10  480M
+ card 2 [Backup]  at usb-0000:00:14.0-10, high speed
+ card 3 [Main  ]  at usb-0000:00:14.0-8,  high speed
+```
+
+```bash
+cd gateware
+BOARD=breakout USB_PHASE=0 USB_IDELAY_TAP_A=6 USB_IDELAY_TAP_B=8 \
+  BUILD_DIR=build_dual ../.venv/bin/python3 build_dual.py
+```
+
+`gateware/usb_dual_top.py` — `UsbLink` is one PHY's ULPI→UTMI→LUNA USBDevice
+stack, written domain-agnostically; `UsbDual` instantiates it twice, the second
+wrapped in `DomainRenamer({"usb": "usb_b"})`. Known-good bitstream:
+`bitstreams/known-good/breakout-dual-DUAL-both-PHYs-HS-tapA6-tapB8.bit`.
+
+> **STATUS: enumeration only.** The ISO endpoints are declared so the
+> descriptors stay honest, but they are tied inert — no iso streams, no
+> `USBStreamToChannels`, no DAC, no feedback servo, so **neither card plays
+> audio yet**. Shaped this way deliberately: it settles every structural
+> question (two async domains, IDELAYCTRL sharing, pin pressure, Fmax) for a
+> fraction of the logic, before moving 400 lines of working audio code.
+
+#### The two PHYs need DIFFERENT taps — A=6, B=8
+
+One shared tap does not work, and the two failure modes are *opposite*, which
+is what makes them diagnosable instead of a blind sweep:
+
+| PHY-A tap | writes / D+ pull-up | result |
+|---|---|---|
+| 8 | **no** (`L=0`) | RX perfect (`SF` saturated, `RE=0000`) but never addressed |
+| none | yes (`L=1`) | host sees it, drops to **full speed**, `error -71` |
+| **6** | **yes** | **enumerates at high speed** |
+
+Reads and SOF decoding tolerate extra `nxt`/data delay — a PID compare on an
+already-framed byte. The ULPI register-**write** handshake, which times our
+driven data against the PHY's `NXT`, does not. So:
+
+> **"RX fine but no pull-up" ⇒ tap too LARGE. "Pull-up fine but no HS chirp"
+> ⇒ tap too SMALL.** That pair brackets the eye from both sides.
+
+`USB_IDELAY_TAP_A` / `USB_IDELAY_TAP_B` set them independently, with
+`USB_IDELAY_TAP` as a fallback for both. Unset means *no IDELAYE2 at all* on
+that bus. `avb-aes3` carrying two separate tap CSRs was saying this all along.
+
+#### cd_usb and cd_usb_b are genuinely ASYNCHRONOUS
+
+Each USB3300 runs its own crystal. Measured on this board: PHY-A's CLKOUT is
+**60,006,601 Hz**, PHY-B's is **60,002,287 Hz** — 72 ppm apart. The two domains
+drift relative to each other forever, so **anything crossing between them needs
+a real CDC**. There is no "they're both 60 MHz" shortcut. This is the dominant
+constraint on the audio datapath: two independently drifting hosts feeding one
+AVB media clock.
+
+#### Structural rules for a dual build
+
+- **Exactly ONE IDELAYCTRL for the whole device.** Both ULPI buses are in bank
+  34; a second one fails with *"more than one IDELAYCTRL for the default
+  IODELAY_GROUP"*. `UsbDual` owns it — plus an explicit `BUFG` for its REFCLK,
+  since the CAR drives `cd_fast` straight off PLL `CLKOUT1` unbuffered —
+  and `UsbLink` instantiates only `IDELAYE2`s. `avb-aes3` shares its CRG's
+  single `S7IDELAYCTRL` between its two ULPIs for the same reason.
+- The platform exposes the second bus **additively**: `ulpi`/`ulpi_clock` stay
+  env-selected so every archived build still reproduces byte-for-byte, and
+  `ulpi_b`/`ulpi_clock_b` are the other map. A dual design leaves `USB_BACKUP`
+  **unset** and requests both.
+- The CAR takes `ulpi_clk_pin_b` and creates `cd_usb_b`; the `*_b` options each
+  default to the corresponding `*` option, so PHY-B gets the identical proven
+  recipe unless deliberately overridden.
+- **nextpnr names a clock after the DOMAIN.** PHY-B's net is `usb_b_clk`, not
+  the PLL output signal name — `create_clock ... [get_nets usb_clk_pll_b]`
+  silently failed to match and PHY-B's paths were timed against the 12 MHz
+  default. Check the reported *"PASS at"* value, not merely that a
+  `create_clock` line exists.
+
+#### Cost: area was never the constraint
+
+Two full USB stacks routed on the first attempt — `overused=31 → 0` at router
+iteration 3 — with `usb_clk` at 97.99 MHz and `usb_b_clk` at 93.01 MHz, both
+passing against 60 MHz, using **4% FFs, 8% LUTs, 0 BRAM** (yosys runs
+`-nobram`, so the FIFOs are already in fabric) and 3 `PLLE2_ADV`. Watch Fmax,
+not utilisation, as the audio path lands.
+
 ### I2S DAC (PCM5102A) → P6 header
 
 | I2S signal | i9plus pin |

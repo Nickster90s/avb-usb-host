@@ -31,12 +31,24 @@ class ColorlightI9PlusCAR(Elaboratable):
     """
 
     def __init__(self, *, ulpi_clk_pin=None, usb_phase=-120.0, usb_pll=True,
-                 usb_invert=False,
+                 usb_invert=False, ulpi_clk_pin_b=None,
+                 usb_phase_b=None, usb_pll_b=None, usb_invert_b=None,
                  clock_frequencies=None, clock_signal_name=None):
         # LUNA passes clock_frequencies/clock_signal_name but we don't
         # use them; ulpi_clk_pin is OUR addition — the top-level provides
         # the already-requested ulpi.clk subsignal.
         self.ulpi_clk_pin = ulpi_clk_pin
+        # ulpi_clk_pin_b: a SECOND, INDEPENDENT ULPI clock, for running both
+        # USB3300s from one bitstream. The two PHYs have their own crystals --
+        # measured 60,006,601 Hz (A) vs 60,002,287 Hz (B), 72 ppm apart -- so
+        # cd_usb and cd_usb_b are genuinely asynchronous domains and anything
+        # crossing between them needs a CDC. The *_b options default to the
+        # corresponding A option so the second PHY gets the identical proven
+        # recipe unless deliberately overridden.
+        self.ulpi_clk_pin_b = ulpi_clk_pin_b
+        self.usb_phase_b  = usb_phase  if usb_phase_b  is None else usb_phase_b
+        self.usb_pll_b    = usb_pll    if usb_pll_b    is None else usb_pll_b
+        self.usb_invert_b = usb_invert if usb_invert_b is None else usb_invert_b
         self.usb_phase    = usb_phase
         # usb_pll=False → drive cd_usb.clk straight from the ULPI clock
         # pin (tools insert a BUFG). Matches ultraembedded's validated
@@ -55,6 +67,10 @@ class ColorlightI9PlusCAR(Elaboratable):
         cd_fast  = ClockDomain("fast")
         cd_audio = ClockDomain("audio")          # ~12.288 MHz for the I2S DAC
         m.domains += [cd_sync, cd_usb, cd_fast, cd_audio]
+        cd_usb_b = None
+        if self.ulpi_clk_pin_b is not None:
+            cd_usb_b = ClockDomain("usb_b")
+            m.domains += [cd_usb_b]
 
         clk25 = platform.request(platform.default_clk, 0)
 
@@ -126,6 +142,37 @@ class ColorlightI9PlusCAR(Elaboratable):
             cd_fast.clk.eq(fast_clk),
             cd_audio.clk.eq(audio_clk),
         ]
+
+        def _usb_clock(pin, phase, use_pll, invert, tag):
+            """Build one ULPI-derived 60 MHz clock. `tag` uniquifies the
+            submodule names so this can be called once per PHY. The body is
+            the original single-PHY code verbatim -- see the long notes below
+            for why the BUFG before CLKIN is mandatory."""
+            if use_pll:
+                fb = Signal(name=f"usbpll_fb{tag}")
+                out = Signal(name=f"usb_clk_pll{tag}")
+                locked = Signal(name=f"usb_pll_locked{tag}")
+                clkin_buf = Signal(name=f"usb_clkin_buf{tag}")
+                m.submodules[f"usb_clkin_bufg{tag}"] = Instance(
+                    "BUFG", i_I=pin, o_O=clkin_buf)
+                m.submodules[f"usbpll{tag}"] = Instance("PLLE2_ADV",
+                    p_BANDWIDTH="OPTIMIZED", p_COMPENSATION="INTERNAL",
+                    p_STARTUP_WAIT="FALSE", p_DIVCLK_DIVIDE=1,
+                    p_CLKFBOUT_MULT=16, p_CLKFBOUT_PHASE=0.0,
+                    p_CLKIN1_PERIOD=16.667, p_CLKOUT0_DIVIDE=16,
+                    p_CLKOUT0_PHASE=phase, p_CLKOUT0_DUTY_CYCLE=0.5,
+                    i_CLKIN1=clkin_buf, i_CLKFBIN=fb, o_CLKFBOUT=fb,
+                    o_CLKOUT0=out, o_LOCKED=locked)
+                return out
+            elif invert:
+                return ~pin
+            else:
+                return pin
+
+        if cd_usb_b is not None:
+            m.d.comb += cd_usb_b.clk.eq(_usb_clock(
+                self.ulpi_clk_pin_b, self.usb_phase_b, self.usb_pll_b,
+                self.usb_invert_b, "_b"))
 
         if self.usb_pll:
             usbpll_feedback = Signal()

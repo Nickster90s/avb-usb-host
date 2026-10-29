@@ -181,6 +181,44 @@ except KeyError:
         "BOARD=%r has no %s ULPI map; expected one of %s"
         % (_BOARD, _key[1], sorted({b for b, _ in _ULPI_MAPS})))
 
+# The OTHER map, for a design that drives BOTH USB3300s from one bitstream.
+# `ulpi`/`ulpi_clock` stay exactly as they are -- env-selected, so every
+# archived build reproduces byte-for-byte -- and the second bus is exposed
+# ADDITIVELY as `ulpi_b`/`ulpi_clock_b`. A dual design therefore leaves
+# USB_BACKUP unset and requests ulpi (= Main) plus ulpi_b (= Backup).
+# None when the board has only one map, so requesting ulpi_b then fails loudly
+# at build time rather than silently landing on the wrong pins.
+_ULPI_DIMM_B = _ULPI_MAPS.get((_BOARD, "main" if _BACKUP else "backup"))
+
+
+def _ulpi_b_resources():
+    """The second ULPI bus as Resources, or [] when the board has no 2nd map.
+
+    Mirrors the `ulpi` / `ulpi_clock` resources exactly, minus the diagnostic
+    pull attributes (USB_PULLDN / USB_PULLUP_DATA), which are single-bus
+    bring-up aids and would be ambiguous applied to two buses at once.
+
+    NOTE on IDELAY: both ULPI buses live in BANK 34 on the breakout, so a dual
+    design needs exactly ONE IDELAYCTRL shared by all 20 IDELAYE2s. Two will
+    fail with "more than one IDELAYCTRL for the default IODELAY_GROUP" -- this
+    is why avb-aes3 shares the CRG's single S7IDELAYCTRL between its two ULPIs.
+    """
+    if _ULPI_DIMM_B is None:
+        return []
+    d = _ULPI_DIMM_B
+    return [
+        Resource("ulpi_clock_b", 0, Pins(_dimm(d["clk"]), dir="i"),
+                 Clock(60e6), Attrs(IOSTANDARD="LVCMOS33")),
+        Resource("ulpi_b", 0,
+            Subsignal("dir",  Pins(_dimm(d["dir"]), dir="i"), Attrs(**_IN_IOB)),
+            Subsignal("nxt",  Pins(_dimm(d["nxt"]), dir="i"), Attrs(**_IN_IOB)),
+            Subsignal("stp",  Pins(_dimm(d["stp"]), dir="o"), Attrs(IOB="TRUE")),
+            Subsignal("rst",  Pins(_dimm(d["rst"]), dir="o")),
+            Subsignal("data", Pins(" ".join(_dimm(d[f"d{i}"]) for i in range(8)),
+                                   dir="io"), Attrs(**_IN_IOB)),
+            Attrs(IOSTANDARD="LVCMOS33", SLEW="FAST")),
+    ]
+
 # When USB_IDELAY_TAP is set, an IDELAYE2 sits in each ULPI INPUT path
 # (data/dir/nxt), and IOB is dropped from those pins.
 #
@@ -324,6 +362,10 @@ class ColorlightI9PlusPlatform(XilinxPlatform):
                             **({"PULLUP": "TRUE"}
                                if _os.environ.get("USB_PULLUP_DATA") == "1" else {}))),
             Attrs(IOSTANDARD="LVCMOS33", SLEW="FAST")),
+
+        # The SECOND ULPI bus, for driving both USB3300s from one bitstream.
+        # Empty on a board with only one map, so requesting it fails loudly.
+        *_ulpi_b_resources(),
 
         # ----- DIAGNOSTIC: DIR/NXT as OUTPUTS -----------------------------
         # Same pins as the "ulpi" resource's dir/nxt, but drivable, so the

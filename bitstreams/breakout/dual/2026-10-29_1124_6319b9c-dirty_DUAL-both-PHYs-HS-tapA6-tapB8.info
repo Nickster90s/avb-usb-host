@@ -1,0 +1,202 @@
+# breakout / dual / design / 2026-10-29_1124_6319b9c-dirty_DUAL-both-PHYs-HS-tapA6-tapB8
+# archived:  2026-10-29T11:24:50+01:00
+# source:    /home/lisp/FPGA/avb-usb-host/gateware/build_sw_a6/top.bit (2026-10-29 11:23:52)
+# size:      2192113 bytes
+# sha256:    406af87f92fcfb2308d90be356c7af3ec14575604a4313f37970e4d80e6c2c75
+# build dir: build_sw_a6
+
+## REBUILD RECIPE
+cd /home/lisp/FPGA/avb-usb-host/gateware
+BOARD=breakout USB_PHASE=0 \
+  CHIPDB_DIR=${CHIPDB_DIR:-/home/lisp/FPGA/demo-projects/chipdb} \
+  DB_DIR=${DB_DIR:-/home/lisp/openxc7/openxc7/opt/nextpnr-xilinx/external/prjxray-db} \
+  ../.venv/bin/python3 build_dual.py
+# NOTE amaranth 0.4.5 is required - the system python has 0.5.8, which
+#      has no amaranth.vendor.xilinx. ALWAYS use ../.venv/bin/python3.
+# NOTE a position-A (T4) variant of a build_*.py is made by copying it,
+#      changing BUILD_DIR, and NOT setting USB_BACKUP=1.
+
+## ENV AT ARCHIVE TIME
+#   BOARD=breakout
+#   USB_BACKUP=<unset>
+#   USB_PHASE=0
+#   SAMPLE_EDGE=<unset>
+#   CHIPDB_DIR=<unset>
+#   DB_DIR=<unset>
+
+## ULPI PIN ASSIGNMENTS (from top.xdc)
+#           set_property LOC T3 [get_ports {ulpi_0__dir__io}]
+#           set_property LOC T3 [get_ports {ulpi_0__dir__io}]
+#           set_property LOC T3 [get_ports {ulpi_0__dir__io}]
+#           set_property LOC U2 [get_ports {ulpi_0__nxt__io}]
+#           set_property LOC U2 [get_ports {ulpi_0__nxt__io}]
+#           set_property LOC U2 [get_ports {ulpi_0__nxt__io}]
+#           set_property LOC U3 [get_ports {ulpi_0__stp__io}]
+#           set_property LOC U3 [get_ports {ulpi_0__stp__io}]
+#           set_property LOC U3 [get_ports {ulpi_0__stp__io}]
+#           set_property LOC R2 [get_ports {ulpi_0__rst__io}]
+#           set_property LOC R2 [get_ports {ulpi_0__rst__io}]
+#           set_property LOC V2 [get_ports {ulpi_0__data__io[0]}]
+#           set_property LOC V2 [get_ports {ulpi_0__data__io[0]}]
+#           set_property LOC V2 [get_ports {ulpi_0__data__io[0]}]
+#           set_property LOC V3 [get_ports {ulpi_0__data__io[1]}]
+#           set_property LOC V3 [get_ports {ulpi_0__data__io[1]}]
+#           set_property LOC V3 [get_ports {ulpi_0__data__io[1]}]
+#           set_property LOC W1 [get_ports {ulpi_0__data__io[2]}]
+#           set_property LOC W1 [get_ports {ulpi_0__data__io[2]}]
+#           set_property LOC W1 [get_ports {ulpi_0__data__io[2]}]
+#           set_property LOC Y1 [get_ports {ulpi_0__data__io[3]}]
+#           set_property LOC Y1 [get_ports {ulpi_0__data__io[3]}]
+#           set_property LOC Y1 [get_ports {ulpi_0__data__io[3]}]
+#           set_property LOC AA1 [get_ports {ulpi_0__data__io[4]}]
+#           set_property LOC AA1 [get_ports {ulpi_0__data__io[4]}]
+#           set_property LOC AA1 [get_ports {ulpi_0__data__io[4]}]
+#           set_property LOC AB1 [get_ports {ulpi_0__data__io[5]}]
+#           set_property LOC AB1 [get_ports {ulpi_0__data__io[5]}]
+#           set_property LOC AB1 [get_ports {ulpi_0__data__io[5]}]
+#           set_property LOC W2 [get_ports {ulpi_0__data__io[6]}]
+#           set_property LOC W2 [get_ports {ulpi_0__data__io[6]}]
+#           set_property LOC W2 [get_ports {ulpi_0__data__io[6]}]
+#           set_property LOC Y2 [get_ports {ulpi_0__data__io[7]}]
+#           set_property LOC Y2 [get_ports {ulpi_0__data__io[7]}]
+#           set_property LOC Y2 [get_ports {ulpi_0__data__io[7]}]
+#           set_property LOC AB7 [get_ports {ulpi_b_0__dir__io}]
+#           set_property LOC AB7 [get_ports {ulpi_b_0__dir__io}]
+#           set_property LOC AB7 [get_ports {ulpi_b_0__dir__io}]
+#           set_property LOC AB6 [get_ports {ulpi_b_0__nxt__io}]
+#           set_property LOC AB6 [get_ports {ulpi_b_0__nxt__io}]
+#           set_property LOC AB6 [get_ports {ulpi_b_0__nxt__io}]
+#           set_property LOC Y7 [get_ports {ulpi_b_0__stp__io}]
+#           set_property LOC Y7 [get_ports {ulpi_b_0__stp__io}]
+#           set_property LOC Y7 [get_ports {ulpi_b_0__stp__io}]
+#           set_property LOC AA6 [get_ports {ulpi_b_0__rst__io}]
+#           set_property LOC AA6 [get_ports {ulpi_b_0__rst__io}]
+#           set_property LOC AA8 [get_ports {ulpi_b_0__data__io[0]}]
+#           set_property LOC AA8 [get_ports {ulpi_b_0__data__io[0]}]
+#           set_property LOC AA8 [get_ports {ulpi_b_0__data__io[0]}]
+#           set_property LOC AB8 [get_ports {ulpi_b_0__data__io[1]}]
+#           set_property LOC AB8 [get_ports {ulpi_b_0__data__io[1]}]
+#           set_property LOC AB8 [get_ports {ulpi_b_0__data__io[1]}]
+#           set_property LOC Y8 [get_ports {ulpi_b_0__data__io[2]}]
+#           set_property LOC Y8 [get_ports {ulpi_b_0__data__io[2]}]
+#           set_property LOC Y8 [get_ports {ulpi_b_0__data__io[2]}]
+#           set_property LOC W7 [get_ports {ulpi_b_0__data__io[3]}]
+#           set_property LOC W7 [get_ports {ulpi_b_0__data__io[3]}]
+#           set_property LOC W7 [get_ports {ulpi_b_0__data__io[3]}]
+#           set_property LOC Y9 [get_ports {ulpi_b_0__data__io[4]}]
+#           set_property LOC Y9 [get_ports {ulpi_b_0__data__io[4]}]
+#           set_property LOC Y9 [get_ports {ulpi_b_0__data__io[4]}]
+#           set_property LOC V8 [get_ports {ulpi_b_0__data__io[5]}]
+#           set_property LOC V8 [get_ports {ulpi_b_0__data__io[5]}]
+#           set_property LOC V8 [get_ports {ulpi_b_0__data__io[5]}]
+#           set_property LOC W9 [get_ports {ulpi_b_0__data__io[6]}]
+#           set_property LOC W9 [get_ports {ulpi_b_0__data__io[6]}]
+#           set_property LOC W9 [get_ports {ulpi_b_0__data__io[6]}]
+#           set_property LOC V9 [get_ports {ulpi_b_0__data__io[7]}]
+#           set_property LOC V9 [get_ports {ulpi_b_0__data__io[7]}]
+#           set_property LOC V9 [get_ports {ulpi_b_0__data__io[7]}]
+#           set_property LOC T4 [get_ports {ulpi_clock_0__io}]
+#           set_property LOC AA4 [get_ports {ulpi_clock_b_0__io}]
+
+commit 6319b9cc20d744119b2b606f15469a2401a4f4fc
+Author: Nick <nick.eventslight@gmail.com>
+Date:   Thu Oct 29 10:51:51 2026 +0100
+
+    usb2: PHY-B enumerates at High Speed -- IDELAY tap 8 + OE from post-delay dir
+    
+    USB2 on the custom SODIMM breakout is alive:
+    
+        usb 1-10: new high-speed USB device number 18 using xhci_hcd
+        usb 1-10: New USB device found, idVendor=1209, idProduct=eab2
+        usb 1-10: Product: N-Series AVB Switchover Backup
+        card 3 [Backup]: USB-Audio at usb-0000:00:14.0-10, high speed
+    
+    Recipe:
+        BOARD=breakout USB_BACKUP=1 USB_PHASE=0 USB_IDELAY_TAP=8 \
+          BUILD_DIR=build_probe_bk2 ../.venv/bin/python3 build_probe.py
+    
+    Two independent faults, both required:
+    
+    1. DIR/NXT transposed in the hand-wiring (USB_SWAP_DIRNXT=1, committed earlier
+       as the platform default).
+    2. USB_IDELAY_TAP=8. yosys+nextpnr-xilinx inserts no IOB input flop and no
+       automatic IDELAY, so the IOB->first-flop ROUTING delay sets the ULPI
+       sampling point -- and it changes every rebuild as placement shuffles. Two
+       unconstrained P&R runs of the identical design gave `error -71` and no D+
+       pull-up at all. avb-aes3 solved this with a firmware-tunable tap
+       (ulpi_idelay_tap, CSR reset 8); this project needed the same number.
+    
+    usb_utmi_top.py: drive the data-bus OE from dir_s (post-IDELAY) instead of the
+    raw ulpi.dir.i. THIS IS WHAT MADE IDELAY ROUTABLE. Every prior attempt parked
+    at exactly overused=3 forever -- VAR_LOAD, VARIABLE with a shared CE, FIXED,
+    FIXED with i_C tied off, and FIXED with a BUFG on REFCLK plus injected
+    create_clock. Asking one pad for both a delayed and an undelayed copy of itself
+    is unroutable by construction: a 7-series input path is
+    PAD -> IBUF -> (IDELAY | direct), a one-of-two mux, not a fan-out. Router then
+    went overused=1 -> 0 at iteration 7. A constant overuse count that is immune to
+    every knob is a structural impossibility, not congestion. With no IDELAY,
+    dir_s IS ulpi.dir.i, so PHY-A cannot regress.
+    
+    usb_utmi_top.py: USB_PROBE=1 adds a UTMI-level enumeration probe, env-gated
+    inside the real design rather than a copy so it cannot drift from the known-good
+    config. Prints over the R3 UART at 115200:
+    
+        SF=FFFF SU=0014 DA=0023 AK=0016 RE=0000 TV=003C LS=0 S=80 06 00 01 00 00 40 00
+    
+    SF counts SOFs, which the host emits every 125 us forever -- a free always-on RX
+    monitor. AK counts ACKs FROM the host, which clears our TX outright. S= is the
+    first SETUP payload, and because the host's first request is always
+    GET_DESCRIPTOR(device) = 80 06 00 01 00 00 40 00, the expected value is a
+    built-in control: anything else is RX corruption caught red-handed.
+    
+    usb_descriptors.py + usb_utmi_top.py: per-PHY identity, following USB_BACKUP so
+    a build cannot be mislabelled. Main = eab1/serial 0, Backup = eab2/serial 1.
+    product_id was hardcoded; it is now plumbed to d.idProduct. The separate-PID
+    split follows upstream adat-usb2-audio-interface. NOTE 0x1209/0xEAB2 is a
+    pid.codes slot that must actually be allocated to this project -- USB_PID=0xeab1
+    puts both ports back on one PID.
+    
+    build_probe.py: injects the create_clock / set_clock_groups lines the Amaranth
+    Xray template omits, as build_dac.py already did. Without them nextpnr times
+    every path blind (usb_clk reported "PASS at 12.00 MHz"); with them it reports
+    PASS at the real 60.00 MHz. That matters more here than for timing reports,
+    since placement quality IS the sampling point.
+    
+    bitstreams/archive.sh: `|| true` on the builder-detection grep. Under
+    set -euo pipefail a grep that matched nothing killed the script AFTER copying
+    the .bit but BEFORE writing the .info -- the mechanism behind this tree's "44 of
+    52 bitstreams have no recipe". It fired for every builder taking BUILD_DIR from
+    the environment. Adds an ARCHIVE_BUILDER= override for those.
+    
+    platform.py: withdraw the unsupported claim that IOB=TRUE or IOI clock
+    resources were behind the IDELAY routing failure, and record what it actually
+    was.
+    
+    Tap 8 is verified on three different placements but NOT bracketed -- build taps
+    4 and 12 to learn the real margin.
+    
+    Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+## uncommitted diff vs HEAD:  6 files changed, 90 insertions(+), 13 deletions(-)
+ ...7895049_2026-05-28_1605_usb-hs-uac2-working.bit |  3 --
+ ...895049_2026-05-28_1605_usb-hs-uac2-working.info |  3 --
+ bitstreams/backup-CLKTEST-v4.bit                   |  3 --
+ bitstreams/backup-usb_utmi_ph0_READY.bit           |  3 --
+ gateware/colorlight_i9plus_car.py                  | 49 +++++++++++++++++++++-
+ gateware/colorlight_i9plus_platform.py             | 42 +++++++++++++++++++
+ 6 files changed, 90 insertions(+), 13 deletions(-)
+
+## build log highlights
+Info: Checksum: 0xc8ccd128
+Info: Device utilisation:
+Info: Max frequency for clock       'clk': 123.41 MHz (PASS at 12.00 MHz)
+Info: Max frequency for clock   'usb_clk': 88.95 MHz (PASS at 60.00 MHz)
+Info: Max frequency for clock 'usb_b_clk': 84.19 MHz (PASS at 60.00 MHz)
+Info: Checksum: 0x0a7ba1f2
+Info:     iter=1 wires=108756 overused=3432 overuse=3515 archfail=NA
+Info:     iter=2 wires=110912 overused=25 overuse=25 archfail=NA
+Info:     iter=3 wires=110945 overused=0 overuse=0 archfail=0
+Info: Checksum: 0x5e1a5786
+Info: Max frequency for clock       'clk': 126.58 MHz (PASS at 12.00 MHz)
+Info: Max frequency for clock   'usb_clk': 105.16 MHz (PASS at 60.00 MHz)
+Info: Max frequency for clock 'usb_b_clk': 101.12 MHz (PASS at 60.00 MHz)
