@@ -170,6 +170,133 @@ their `build_clktest.py` / `build_led.py` / `build_diag.py` drivers. A
 user's picocom without a CPU. Baseline backup USB build (ready for once the
 crystal is fixed): `bitstreams/backup-usb_utmi_ph0_READY.bit`.
 
+### Custom SODIMM breakout — USB2 / PHY-B **WORKING** (2026-10-29)
+
+PHY-B on the custom SODIMM breakout board enumerates as a High-Speed UAC2
+device. Note this is a *different* board from the ext-board backup documented
+above — different pins, and a different root cause.
+
+```
+usb 1-10: new high-speed USB device number 18 using xhci_hcd
+usb 1-10: New USB device found, idVendor=1209, idProduct=eab2
+usb 1-10: Product: N-Series AVB Switchover Backup
+card 3 [Backup]: USB-Audio - N-Series AVB Switchover Backup
+               at usb-0000:00:14.0-10, high speed
+```
+
+**Build recipe:**
+
+```bash
+cd gateware
+BOARD=breakout USB_BACKUP=1 USB_PHASE=0 USB_IDELAY_TAP=8 \
+  BUILD_DIR=build_probe_bk2 ../.venv/bin/python3 build_probe.py
+```
+
+Known-good bitstream: `bitstreams/known-good/breakout-usb2-ENUMERATES-Backup-eab2-idelay-tap8.bit`
+(each archived `.bit` has an `.info` beside it carrying its exact rebuild recipe).
+
+#### Two independent faults had to be fixed
+
+1. **DIR and NXT were physically transposed in the hand-wiring** (2026-10-28).
+   `USB_SWAP_DIRNXT` now defaults to `1` in `colorlight_i9plus_platform.py`;
+   set it to `0` after exchanging the leads at J5.2/J5.5. The tell was *phase
+   independence*: identical failure at 8 PLL phases and 3 clocking modes. Every
+   timing hypothesis predicts variation with phase; a wiring permutation
+   predicts none. **Test transpositions before timing.**
+
+2. **`USB_IDELAY_TAP=8` — the input eye needed centring** (2026-10-29).
+   yosys+nextpnr-xilinx inserts no IOB input flop and no automatic IDELAY, so
+   the IOB→first-flop *routing* delay sets the ULPI sampling point — and that
+   delay changes on every rebuild as placement shuffles. Two unconstrained P&R
+   runs of the identical design gave `error -71` and *no D+ pull-up at all*
+   respectively. `avb-aes3` solved this years earlier with a firmware-tunable
+   tap (`ulpi_idelay_tap`, CSR reset `8`, stepped by its `u` command); this
+   project needed the same number.
+
+#### The IDELAY build would not route — and it was our netlist, not the tool
+
+Every IDELAY attempt parked at exactly `overused=3` forever: VAR_LOAD, VARIABLE
+with a shared CE, FIXED, FIXED with `i_C` tied off, and FIXED with a BUFG on
+IDELAYCTRL's REFCLK plus injected `create_clock`. The cause was in
+`usb_utmi_top.py`: the data-bus output-enable was driven from the **raw**
+`ulpi.dir.i` while the IDELAY block claimed that same pad as `IDATAIN`. A
+7-series input path is `PAD → IBUF → (IDELAY | direct)` — a one-of-two **mux**,
+not a fan-out — so a delayed *and* an undelayed copy of `dir` is unroutable by
+construction. Driving OE from the post-delay `dir_s` fixed it: `overused=1 → 0`
+at router iteration 7.
+
+> **A constant overuse count that is immune to every knob is a structural
+> impossibility, not congestion.** Congestion varies with placement and
+> clocking; a physical mux conflict does not. Look for a signal used both raw
+> and transformed.
+
+With no IDELAY, `dir_s` *is* `ulpi.dir.i`, so this cannot regress PHY-A.
+
+#### Sweeping the tap
+
+A FIXED tap costs zero extra nets and routes. A **runtime** sweep does not:
+`avb_soc.py` warns that a boot-time LD pulse "STALLED nextpnr's HeAP placer
+(41 s → 15+ min, because the pulse fans out to 10 IO-site-locked IDELAYE2s)",
+which is exactly what `ulpi_tapscan_top.py` does. So sweep by **rebuilding per
+tap** (`USB_IDELAY_TAP=n`), not by generating the sweep in fabric — a CPU/CSR is
+what makes the runtime version viable in `avb-aes3`.
+
+Tap 8 has been verified on three different placements. It has **not** been
+bracketed — build taps 4 and 12 to learn the actual margin.
+
+#### `USB_PROBE=1` — the UTMI enumeration probe
+
+Env-gated inside the real design (not a copy, so it cannot drift from the
+known-good config). Prints to the R3 UART at **115200** 8N1:
+
+```
+SF=FFFF SU=0014 DA=0023 AK=0016 RE=0000 TV=003C LS=0 S=80 06 00 01 00 00 40 00
+```
+
+| field | meaning |
+|---|---|
+| `SF` | SOF packets. The host sends one every 125 µs forever, so this is a free always-on RX monitor. Climbing ⇒ the RX path decodes real 480 Mbps packets. |
+| `SU` / `DA` | SETUP tokens / DATA packets |
+| `AK` | ACKs **from the host** — non-zero clears our TX outright |
+| `RE` | UTMI rx_error count. Climbing alongside `SF` ⇒ packets arrive mis-framed. |
+| `TV` | our transmissions |
+| `LS` | line_state. `1` = J, our D+ pull-up is on the bus; `0` at HS = normal idle. |
+| `S=` | payload of the first DATA packet after the first SETUP. The host's first request is always `GET_DESCRIPTOR(device)` = `80 06 00 01 00 00 40 00`, so **the expected value is a built-in control** — anything else is RX corruption caught red-handed. |
+
+#### ⚠️ Host-side trap: the port stops looking
+
+After a run of `error -71`, the kernel gives up on the port and will **not**
+re-detect the device when the FPGA is reconfigured — even though
+`usb1-port10/disable` reads `0`. The probe showed `LS=1` (our pull-up on the
+bus) with `SF=0000` (host not looking). Force a port cycle:
+
+```bash
+P=/sys/bus/usb/devices/usb1/1-0:1.0/usb1-port10
+echo 1 | sudo tee $P/disable; sleep 2; echo 0 | sudo tee $P/disable
+```
+
+**`LS=1` with `SF=0000` means "we are presenting, the host is not looking" —
+cycle the port before concluding the gateware is at fault.**
+
+#### Per-PHY USB identity
+
+Identity follows `USB_BACKUP`, the same env var that selects the pins, so a
+build cannot be mislabelled:
+
+| | PHY-A (`USB_BACKUP` unset) | PHY-B (`USB_BACKUP=1`) |
+|---|---|---|
+| `iProduct` | `N-Series AVB Switchover Main` | `N-Series AVB Switchover Backup` |
+| `idProduct` | `0xEAB1` | `0xEAB2` |
+| `iSerialNumber` | `0` | `1` |
+
+Overrides: `USB_PRODUCT=<name>`, `USB_PID=0xeab1`. The separate-PID split
+follows upstream `adat-usb2-audio-interface`
+(`idProduct = 0xADA1 if "USB1" in product_id else 0xADA2`).
+
+> **`0x1209/0xEAB2` is a pid.codes slot that must actually be allocated to this
+> project.** Fine on the bench; confirm the allocation before shipping, or set
+> `USB_PID=0xeab1` to put both ports back on one PID.
+
 ### I2S DAC (PCM5102A) → P6 header
 
 | I2S signal | i9plus pin |

@@ -60,46 +60,165 @@ def _dimm(n):
 # package_pins.csv. CLK on T3 silently builds but never clocks the
 # ulpi domain because there's no MRCC/SRCC there to feed a BUFG.
 import os as _os
-if _os.environ.get("USB_BACKUP", "") == "1":
-    # BACKUP ULPI breakout (2nd connector) — bank-34, HDMI-safe pinout matching
-    # avb-aes3 ulpi_io() USB_BACKUP. SODIMM numbers verified against _DIMM_PINS:
-    #   clk V4=88 dir R4=90 nxt W4=85 stp T5=92 rst Y4=89
-    #   d0 Y9=117 d1 V8=119 d2 W9=121 d3 V9=123 d4 W6=104 d5 V7=110 d6 Y3=83 d7 Y6=95
-    _d6, _d7 = 83, 95                          # D6=Y3(83)  D7=Y6(95)
-    if _os.environ.get("USB_SWAP_D67", "") == "1":
-        _d6, _d7 = 95, 83                      # swap in gateware to cancel a
-                                               # physical Y3<->Y6 cross on the breakout
-    # CLOCK-COUPLING FIX: W4 (IO_L12N_T1) is the DIFFERENTIAL PARTNER of the
-    # clock V4 (IO_L12P_T1_MRCC). Originally NXT (fast-toggling) sat on W4 and
-    # coupled into the 60 MHz clock (Main has no signal on its clock pair). SWAP
-    # NXT<->RST: RST is STATIC, so on W4 it can't couple into the clock; NXT
-    # moves to Y4. Both wires already exist on the breakout — just swap the two
-    # dupont connectors (NXT<->RST). Set NXT_W4=1 to build the OLD mapping.
-    if _os.environ.get("NXT_W4", "") == "1":
-        _nxt, _rst = 85, 89          # OLD: nxt=W4, rst=Y4
-    else:
-        _nxt, _rst = 89, 85          # NEW: nxt=Y4, rst=W4 (clock pair = static rst)
-    _ULPI_DIMM = {
-        "clk": 88, "dir": 90, "nxt": _nxt, "stp": 92, "rst": _rst,
-        "d0": 117, "d1": 119, "d2": 121, "d3": 123,
-        "d4": 104, "d5": 110, "d6": _d6,  "d7": _d7,
-    }
-else:
-    _ULPI_DIMM = {
-        "clk": 51,   # T4   — IO_L13N_T2_MRCC_34, MRCC (clock-capable)
-        "dir": 49,   # T3   — regular IO, fine for DIR
-        "nxt": 57,   # U2
-        "stp": 59,   # U3
-        "rst": 41,   # R2   — active-LOW per USB3300 datasheet
-        "d0":  61,   # V2
-        "d1":  63,   # V3
-        "d2":  65,   # W1
-        "d3":  73,   # W2
-        "d4":  67,   # Y1
-        "d5":  69,   # AA1
-        "d6":  71,   # AB1
-        "d7":  75,   # Y2
-    }
+# ---- Board revision + ULPI pin maps (SODIMM pin numbers) --------------------
+# BOARD=ext      (default) Colorlight ext-board + jumpered ULPI breakouts.
+# BOARD=breakout Custom SODIMM baseboard (2 magjacks, 2x USB3300, JTAG/UART USB).
+# USB_BACKUP=1   select the 2nd PHY's pins instead of the 1st.
+#
+# On the custom board BOTH ULPI buses are in BANK 34, entirely on ODD SODIMM
+# pins, and SODIMM 88 (V4) / 90 (R4) are left NC as the differential partners of
+# the two clocks W4 / T4.  The two BREAKOUT maps are verified identical to
+# avb-aes3/avb_soc.py _ULPI_PINS -- keep those in sync.  The ext/backup maps
+# intentionally DIFFER between the projects: this one is the 2026-09-10 bank-34
+# cluster, while avb-aes3 still carries the older bank-14 map whose D6/D7 sit on
+# config-control pins (stuck 0xC0).  Don't "fix" that by copying either way.
+# See memory project-custom-sodimm-breakout-pinout.
+_BOARD = _os.environ.get("BOARD", "ext").strip().lower()
+_BACKUP = _os.environ.get("USB_BACKUP", "") == "1"
+
+_ULPI_MAPS = {
+    # ---- Main ("USB1") ------------------------------------------------------
+    # Same FPGA balls on both boards, but the custom board wires D[7:0] in
+    # ascending SODIMM order, which ROTATES four bits:
+    #   ext       61..75 -> D0 D1 D2 D4 D5 D6 D3 D7   (D3 sits on 73)
+    #   breakout  61..75 -> D0 D1 D2 D3 D4 D5 D6 D7
+    # Picking the wrong one is SILENT -- the bus toggles, the PHY clocks, and
+    # you get corrupt descriptors / error-71.
+    ("ext", "main"): {
+        "clk": 51, "dir": 49, "nxt": 57, "stp": 59, "rst": 41,
+        "d0": 61, "d1": 63, "d2": 65, "d3": 73,
+        "d4": 67, "d5": 69, "d6": 71, "d7": 75,
+    },
+    ("breakout", "main"): {
+        "clk": 51, "dir": 49, "nxt": 57, "stp": 59, "rst": 41,
+        "d0": 61, "d1": 63, "d2": 65, "d3": 67,
+        "d4": 69, "d5": 71, "d6": 73, "d7": 75,
+    },
+
+    # ---- Backup ("USB2") ----------------------------------------------------
+    # ext: bank-34 HDMI-safe cluster on the 2nd jumpered breakout.
+    #   clk V4=88  dir R4=90  stp T5=92
+    #   d0 Y9=117  d1 V8=119  d2 W9=121  d3 V9=123  d4 W6=104  d5 V7=110
+    # Two historical hardware workarounds are preserved as env switches:
+    #   USB_SWAP_D67=1 swaps D6/D7 (Y3=83 <-> Y6=95) to cancel a physical cross
+    #                  on that breakout's wiring.
+    #   NXT_W4=1       restores the OLD nxt=W4(85)/rst=Y4(89) mapping. Default is
+    #                  nxt=Y4(89)/rst=W4(85): W4 is the differential PARTNER of
+    #                  the clock V4, so the STATIC rst lives there and cannot
+    #                  couple into the 60 MHz clock.
+    ("ext", "backup"): {
+        "clk": 88, "dir": 90, "stp": 92,
+        "nxt": 85 if _os.environ.get("NXT_W4", "") == "1" else 89,
+        "rst": 89 if _os.environ.get("NXT_W4", "") == "1" else 85,
+        "d0": 117, "d1": 119, "d2": 121, "d3": 123, "d4": 104, "d5": 110,
+        "d6": 95 if _os.environ.get("USB_SWAP_D67", "") == "1" else 83,
+        "d7": 83 if _os.environ.get("USB_SWAP_D67", "") == "1" else 95,
+    },
+    # breakout: bank 34, ALL-ODD SODIMM, CLK=W4 (85, MRCC L12N_T1_34).
+    # V4 (88) is W4's partner and T4 (51) is the Main clock -> both NC on that
+    # board, so nothing switching sits next to either clock.
+    # ---- 2026-10-28, THE CLOCK PIN: MEASURED, not assumed -------------------
+    # The EasyEDA PCB netlist (FPGA/easyeda/PCB_PCB_fpga_breakout_*.json) says
+    # USB2_CLK is routed CN1.85 -> J5.1 (178.2 mil, no via, no series R) and
+    # that SODIMM 87 carries net "CN1_87" with ZERO COPPER.  So on the PCB, 85
+    # is the clock pin and 87 does not exist.
+    # The BOARD disagrees with the PCB.  ulpi_freq2_top.py counts BOTH pins in
+    # one bitstream (PLL-free, 25 MHz crystal gate):
+    #     W(85/W4) = 00000000 Hz      A(87/AA4) = 60,002,311 Hz
+    # and with a FASM-patched 4.7k PULLDOWN on AA4 (openXC7 drops PULLDOWN from
+    # the XDC -- patch RIOB33_X43Y27.IOB_Y1.PULLTYPE) it still reads
+    #     A = 60,002,301 Hz           (unchanged, 0.17 ppm)
+    # A pulldown crushes a capacitively coupled signal and does nothing to a
+    # driven one, so AA4 is GENUINELY DC-DRIVEN -- it is not crosstalk from 85.
+    # => The 60 MHz CLKOUT physically reaches SODIMM 87, and SODIMM 85 (the
+    #    PCB's engineered, length-matched clock route) is dead: the present
+    #    clock path is an off-PCB bench wire.
+    # Default stays 87 because that is where the clock actually is.  Set
+    # USB2_CLK_DIMM=85 once the clock wire is moved to J5.1, which is the
+    # better home: W4 is IO_L12N_T1_MRCC_34 while AA4 is only SRCC, and 85 has
+    # 178 mil of matched PCB copper instead of a flying lead.
+    # NC CONSTRAINT: with the clock on 87 (AA4 = L11N) its differential partner
+    #   Y4 = SODIMM 89 (L11P) must stay unused/quiet.  On 85 (W4 = L12N) the
+    #   partner is V4 = SODIMM 88.  The PCB leaves 88 and 89 both unrouted.
+    # *** ROOT CAUSE OF THE WHOLE USB2 BRING-UP SAGA, FOUND 2026-10-28 ***
+    # DIR and NXT are PHYSICALLY SWAPPED in the hand-wiring at position B, so
+    # the gateware swaps them back.  DEFAULT IS NOW SWAPPED (=1) because that
+    # matches the board as wired; set USB_SWAP_DIRNXT=0 after physically
+    # exchanging the two leads at J5 (J5.2=USB2_DIR, J5.5=USB2_NXT -- note J5's
+    # pin order differs from J4's, which is how the pair got transposed).
+    # PROOF: with the swap, trace64 returns a textbook register read, and 0x24
+    # (USB3300 vendor-ID low) 1836 times in one capture:
+    #   10C0 IDLE -> 30C0 CMD(0xC0) -> 38C0 NXT=1 accept -> 34C0 DIR=1 turn
+    #        -> 4424 oe=0 D=24  -> 6000/7000 DATA
+    # Without it, 0x24 never appears at any of 8 clock phases or any of 3
+    # clocking modes.
+    # USB_SWAP_DIRNXT=1 exchanges DIR and NXT (2026-10-28).
+    #   Why: at position B the PHY accepts every TXCMD (our nxt_i asserts) and
+    #   then nxt_i STAYS high for 3+ cycles while dir_i shows only a 1-cycle
+    #   blip that `oe = ~dir_i` catches but the trace's own dir bit misses.
+    #   Read with DIR and NXT exchanged, that is a textbook register read:
+    #   PHY NXT pulses once to accept, then PHY DIR asserts for several cycles
+    #   to hand back the data.  Because `oe` is driven from the WRONG pin it
+    #   never releases the bus during the turnaround, so we drive against the
+    #   PHY's data and read back our own C0/00 -- which is exactly why 0x24
+    #   never appears, at ANY clock phase and in ANY clocking mode (a wiring
+    #   permutation is phase-independent, which nothing else explained).
+    ("breakout", "backup"): {
+        "clk": int(_os.environ.get("USB2_CLK_DIMM", "87")),
+        "dir": 97 if _os.environ.get("USB_SWAP_DIRNXT", "1") == "0" else 103,
+        "nxt": 103 if _os.environ.get("USB_SWAP_DIRNXT", "1") == "0" else 97,
+        "stp": 101, "rst": 99,
+        "d0": 109, "d1": 111, "d2": 113, "d3": 115,
+        "d4": 117, "d5": 119, "d6": 121, "d7": 123,
+    },
+}
+
+_key = (_BOARD, "backup" if _BACKUP else "main")
+try:
+    _ULPI_DIMM = _ULPI_MAPS[_key]
+except KeyError:
+    raise ValueError(
+        "BOARD=%r has no %s ULPI map; expected one of %s"
+        % (_BOARD, _key[1], sorted({b for b, _ in _ULPI_MAPS})))
+
+# When USB_IDELAY_TAP is set, an IDELAYE2 sits in each ULPI INPUT path
+# (data/dir/nxt), and IOB is dropped from those pins.
+#
+# CORRECTION 2026-10-28: the original note here claimed IOB="TRUE" was what
+# "fights the IDELAY for the ILOGIC/routing (3 stuck overused wires)". That is
+# UNSUPPORTED. With IOB verified absent from every input in the generated XDC
+# (only `stp` keeps it), nextpnr-xilinx still parks at exactly `overused=3` and
+# thrashes indefinitely -- 4700 router iterations with the count never moving --
+# in VAR_LOAD mode and in VARIABLE mode with a single shared CE net. So the
+# IOB attribute is not the cause, and dropping it does not fix the convergence
+# failure. **No IDELAY build has ever routed on this design, in any mode**: no
+# archived bitstream in bitstreams/ has USB_IDELAY_TAP set, so the IDELAY tap
+# axis has never actually been exercised and must not be cited as explored.
+# CAUSE FOUND 2026-10-29, in the SISTER PROJECT: ../../avb-aes3/avb_soc.py:675
+# runs this exact IDELAY-on-ULPI mechanism and ROUTES, on both ULPI ports, as a
+# shipping design. Its comment names the failure mode outright: adding a
+# boot-time LD pulse "STALLED nextpnr's HeAP placer (41 s -> 15+ min, because
+# the pulse fans out to 10 IO-site-locked IDELAYE2s). Do not do that." That is
+# precisely what ulpi_tapscan_top.py does in both VAR_LOAD and VARIABLE mode,
+# so the `overused=3` thrash is the GENERATED SWEEP LOGIC, not IDELAY itself
+# and not the IOB attribute. The earlier "IOI clock resources will not take
+# both" guess is withdrawn.
+#
+# So: a RUNTIME tap sweep needs a CPU/CSR to pulse LD (avb-aes3 has one, driven
+# by its firmware 'u' command); a FIXED tap costs ZERO extra nets (LD/CE/INC/
+# CNTVALUEIN all tied to constants) and is the form to use here. Sweep by
+# rebuilding at each tap, not by generating the sweep in fabric.
+#
+# avb-aes3 pins tap 8 as the CSR reset AND as IDELAY_VALUE for both ULPI ports
+# (VAR_LOAD powers up at IDELAY_VALUE and only takes CNTVALUEIN on an LD pulse,
+# so the two must match or every build silently runs at IDELAY_VALUE). Tap 8 is
+# a STARTING POINT here, not a proven value: the eye centre depends on the
+# IOB->first-flop routing delay, which differs per design and per rebuild.
+#
+# Note also that IOB=TRUE is itself a no-op on openXC7 (zero input-flop
+# features appear in the FASM), so these pins have no flop at the pad either
+# way.
+_IN_IOB = {} if _os.environ.get("USB_IDELAY_TAP") is not None else {"IOB": "TRUE"}
 
 
 class ColorlightI9PlusPlatform(XilinxPlatform):
@@ -166,6 +285,15 @@ class ColorlightI9PlusPlatform(XilinxPlatform):
         Resource("ulpi_clock", 0, Pins(_dimm(_ULPI_DIMM["clk"]), dir="i"),
                  Clock(60e6), Attrs(IOSTANDARD="LVCMOS33")),
 
+        # Diagnostic-only: a SECOND clock-pin input so one bitstream can
+        # measure the real ULPI clock pin and a neighbour side by side
+        # (built-in differential control).  Set USB_CLK_ALT to a SODIMM pin
+        # number; default 87 (AA4), the pin the PCB leaves unrouted and which
+        # therefore reads pure crosstalk from 85 (W4).
+        Resource("ulpi_clock_alt", 0,
+                 Pins(_dimm(int(_os.environ.get("USB_CLK_ALT", "87"))), dir="i"),
+                 Attrs(IOSTANDARD="LVCMOS33")),
+
         Resource("ulpi", 0,
             # IOB=TRUE on the inputs: forces the first register driven
             # by each input pin to be packed into the IOB block,
@@ -174,17 +302,68 @@ class ColorlightI9PlusPlatform(XilinxPlatform):
             # fabric and the ULPI 60 MHz setup time can't be met.
             # Quartus does this automatically; the open Xilinx toolchain
             # needs an explicit attr.
+            # USB_PULLDN=1: add internal pull-downs on DIR/NXT for the
+            # disconnected-line diagnostic. If DIR/NXT then read LOW they were
+            # floating (not wired); if NXT still reads HIGH it is really driven.
             Subsignal("dir",  Pins(_dimm(_ULPI_DIMM["dir"]), dir="i"),
-                      Attrs(IOB="TRUE")),
+                      Attrs(**_IN_IOB,
+                            **({"PULLDOWN": "TRUE"} if _os.environ.get("USB_PULLDN") == "1" else {}))),
             Subsignal("nxt",  Pins(_dimm(_ULPI_DIMM["nxt"]), dir="i"),
-                      Attrs(IOB="TRUE")),
+                      Attrs(**_IN_IOB,
+                            **({"PULLDOWN": "TRUE"} if _os.environ.get("USB_PULLDN") == "1" else {}))),
             Subsignal("stp",  Pins(_dimm(_ULPI_DIMM["stp"]), dir="o"),
                       Attrs(IOB="TRUE")),
             Subsignal("rst",  Pins(_dimm(_ULPI_DIMM["rst"]), dir="o")),
+            # USB_PULLUP_DATA=1: internal pull-UPs on D0-7 for the
+            # open-vs-short diagnostic. With our output enable off, a line that
+            # then reads 1 is FLOATING (not connected); one that still reads 0
+            # is held LOW (shorted to GND, or actively driven).
             Subsignal("data", Pins(" ".join(_dimm(_ULPI_DIMM[f"d{i}"]) for i in range(8)),
                                    dir="io"),
-                      Attrs(IOB="TRUE")),
+                      Attrs(**_IN_IOB,
+                            **({"PULLUP": "TRUE"}
+                               if _os.environ.get("USB_PULLUP_DATA") == "1" else {}))),
             Attrs(IOSTANDARD="LVCMOS33", SLEW="FAST")),
+
+        # ----- DIAGNOSTIC: DIR/NXT as OUTPUTS -----------------------------
+        # Same pins as the "ulpi" resource's dir/nxt, but drivable, so the
+        # drive-contention continuity test (validated on the data lines:
+        # ~2.6 V = connected/contending, ~3.3 V = open) can be applied to DIR
+        # and NXT, which are inputs in normal operation and therefore cannot
+        # be checked any other way. Request this INSTEAD of "ulpi", never
+        # alongside it -- they claim the same pins.
+        Resource("ulpi_ctl_drive", 0,
+            Subsignal("dir", Pins(_dimm(_ULPI_DIMM["dir"]), dir="o")),
+            Subsignal("nxt", Pins(_dimm(_ULPI_DIMM["nxt"]), dir="o")),
+            Subsignal("stp", Pins(_dimm(_ULPI_DIMM["stp"]), dir="o")),
+            Subsignal("rst", Pins(_dimm(_ULPI_DIMM["rst"]), dir="o")),
+            Attrs(IOSTANDARD="LVCMOS33")),
+
+        # ----- DIAGNOSTIC: DIR/NXT as BIDIRECTIONAL (contention readback) --
+        # Same pins again, but dir="io" so the gateware can DRIVE the pin and
+        # READ THE SAME PAD BACK. DIR is driven by the PHY at all times, so:
+        #   line CONNECTED -> our HIGH fights the PHY's LOW, the pad sits below
+        #                     Vih and the readback DISAGREES with what we drive
+        #   line OPEN       -> nothing fights us, readback always AGREES
+        # This settles "is DIR real or is it a floating pin reading noise?"
+        # with no meter, no pull-ups (openXC7 drops PULLUP/PULLDOWN silently)
+        # and no dependence on the PHY answering a command. Request this
+        # INSTEAD of "ulpi" / "ulpi_ctl_drive" -- they claim the same pins.
+        # DIR and NXT as BIDIRECTIONAL, plus stp/rst/data so this resource can
+        # stand in for "ulpi" entirely (they claim the same pins -- request one
+        # or the other, never both).  Needed for the drive-and-RELEASE decay
+        # timing on DIR vs NXT: contention readback is useless (our driver wins
+        # at our own pad) but release-and-time measures how hard the far end
+        # pulls the net back, which is exactly the DIR-vs-NXT asymmetry to
+        # chase.  stp/data are here only so they can be parked legally.
+        Resource("ulpi_ctl_io", 0,
+            Subsignal("dir", Pins(_dimm(_ULPI_DIMM["dir"]), dir="io")),
+            Subsignal("nxt", Pins(_dimm(_ULPI_DIMM["nxt"]), dir="io")),
+            Subsignal("rst", Pins(_dimm(_ULPI_DIMM["rst"]), dir="o")),
+            Subsignal("stp", Pins(_dimm(_ULPI_DIMM["stp"]), dir="o")),
+            Subsignal("data", Pins(" ".join(_dimm(_ULPI_DIMM[f"d{i}"])
+                                            for i in range(8)), dir="io")),
+            Attrs(IOSTANDARD="LVCMOS33")),
 
         # ----- I2S DAC (PCM5102A) — same balls as avb-aes3 i2s_io() -----
         # SODIMM 46/48/50 → balls U7/U6/U5. DAC board: SCK=GND (no-MCLK,

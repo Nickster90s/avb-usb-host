@@ -1,0 +1,108 @@
+# breakout / usb2 / design / 2026-10-29_1046_b6609a2-dirty_ENUMERATES-Backup-eab2-idelay-tap8
+# archived:  2026-10-29T10:46:02+01:00
+# source:    /home/lisp/FPGA/avb-usb-host/gateware/build_probe_bk2/top.bit (2026-10-29 10:45:28)
+# size:      2192113 bytes
+# sha256:    640fbf1fb686706d8ea0768fb46f380545319b53519c7105c8dc6097829744e0
+# build dir: build_probe_bk2
+
+## REBUILD RECIPE
+cd /home/lisp/FPGA/avb-usb-host/gateware
+BOARD=breakout USB_BACKUP=1 USB_PHASE=0 \
+  CHIPDB_DIR=${CHIPDB_DIR:-/home/lisp/FPGA/demo-projects/chipdb} \
+  DB_DIR=${DB_DIR:-/home/lisp/openxc7/openxc7/opt/nextpnr-xilinx/external/prjxray-db} \
+  ../.venv/bin/python3 build_probe.py
+# NOTE amaranth 0.4.5 is required - the system python has 0.5.8, which
+#      has no amaranth.vendor.xilinx. ALWAYS use ../.venv/bin/python3.
+# NOTE a position-A (T4) variant of a build_*.py is made by copying it,
+#      changing BUILD_DIR, and NOT setting USB_BACKUP=1.
+
+## ENV AT ARCHIVE TIME
+#   BOARD=breakout
+#   USB_BACKUP=1
+#   USB_PHASE=0
+#   SAMPLE_EDGE=<unset>
+#   CHIPDB_DIR=<unset>
+#   DB_DIR=<unset>
+
+## ULPI PIN ASSIGNMENTS (from top.xdc)
+#           set_property LOC AA4 [get_ports {ulpi_clock_0__io}]
+#           set_property LOC AB7 [get_ports {ulpi_0__dir__io}]
+#           set_property LOC AB7 [get_ports {ulpi_0__dir__io}]
+#           set_property LOC AB6 [get_ports {ulpi_0__nxt__io}]
+#           set_property LOC AB6 [get_ports {ulpi_0__nxt__io}]
+#           set_property LOC Y7 [get_ports {ulpi_0__stp__io}]
+#           set_property LOC Y7 [get_ports {ulpi_0__stp__io}]
+#           set_property LOC Y7 [get_ports {ulpi_0__stp__io}]
+#           set_property LOC AA6 [get_ports {ulpi_0__rst__io}]
+#           set_property LOC AA6 [get_ports {ulpi_0__rst__io}]
+#           set_property LOC AA8 [get_ports {ulpi_0__data__io[0]}]
+#           set_property LOC AA8 [get_ports {ulpi_0__data__io[0]}]
+#           set_property LOC AB8 [get_ports {ulpi_0__data__io[1]}]
+#           set_property LOC AB8 [get_ports {ulpi_0__data__io[1]}]
+#           set_property LOC Y8 [get_ports {ulpi_0__data__io[2]}]
+#           set_property LOC Y8 [get_ports {ulpi_0__data__io[2]}]
+#           set_property LOC W7 [get_ports {ulpi_0__data__io[3]}]
+#           set_property LOC W7 [get_ports {ulpi_0__data__io[3]}]
+#           set_property LOC Y9 [get_ports {ulpi_0__data__io[4]}]
+#           set_property LOC Y9 [get_ports {ulpi_0__data__io[4]}]
+#           set_property LOC V8 [get_ports {ulpi_0__data__io[5]}]
+#           set_property LOC V8 [get_ports {ulpi_0__data__io[5]}]
+#           set_property LOC W9 [get_ports {ulpi_0__data__io[6]}]
+#           set_property LOC W9 [get_ports {ulpi_0__data__io[6]}]
+#           set_property LOC V9 [get_ports {ulpi_0__data__io[7]}]
+#           set_property LOC V9 [get_ports {ulpi_0__data__io[7]}]
+
+commit b6609a289ab6c8392131bb06be40338c5ce5c225
+Author: Nick <nick.eventslight@gmail.com>
+Date:   Fri Aug 14 13:52:50 2026 +0200
+
+    docs+hw: backup (2nd) USB3300 ULPI pinout, PCB requirements, diag tooling
+    
+    Document the backup ULPI breakout fully so the marginal-crystal lesson
+    isn't lost:
+    
+    - README: new "Backup (2nd) USB3300 ULPI" section — bank-34 pinout
+      (CLK=V4 MRCC, D-bus Y9/V8/W9/V9/W6/V7/Y3/Y6), build env flags
+      (USB_BACKUP / NXT_W4 / USB_SWAP_D67), the NXT<->RST clock-pair swap
+      rationale, and a PCB/hardware requirements block. Root cause of the
+      whole bring-up saga was a marginal reference crystal (touch-starts,
+      reflow-sensitive) -> load caps + cold-boot USB-PLL retry FSM are
+      mandatory for a production board. Adds the clock-presence pass test.
+    - Fix "free pins" list: Y3/Y4/Y6/W4 (+V4/R4/T5 + D-bus) now used by backup.
+    - platform: USB_BACKUP=1 repins ULPI to the backup breakout; NXT<->RST
+      swap keeps switching signals off the clock's differential partner (W4);
+      uart_tx Resource on R3 for headless diagnostics.
+    - Diag tooling: ulpi_clocktest_top.py (decisive V4 clock-presence test),
+      ulpi_led_diag_top.py, ulpi_regread_uart_top.py + build drivers.
+    - Bitstreams: backup-CLKTEST-v4.bit (pass test), backup-usb_utmi_ph0_READY.bit.
+    - gitignore the diag build-output dirs.
+    
+    Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+## uncommitted diff vs HEAD:  10 files changed, 741 insertions(+), 92 deletions(-)
+ ...7895049_2026-05-28_1605_usb-hs-uac2-working.bit |   3 -
+ ...895049_2026-05-28_1605_usb-hs-uac2-working.info |   3 -
+ bitstreams/archive.sh                              | 222 +++++++++++++++--
+ bitstreams/backup-CLKTEST-v4.bit                   |   3 -
+ bitstreams/backup-usb_utmi_ph0_READY.bit           |   3 -
+ gateware/colorlight_i9plus_car.py                  |  24 +-
+ gateware/colorlight_i9plus_platform.py             | 265 ++++++++++++++++----
+ gateware/ulpi_regread_uart_top.py                  |  24 +-
+ gateware/usb_descriptors.py                        |  15 +-
+ gateware/usb_utmi_top.py                           | 271 ++++++++++++++++++++-
+ 10 files changed, 741 insertions(+), 92 deletions(-)
+
+## build log highlights
+Info: Checksum: 0xc6296cd9
+Info: Device utilisation:
+Info: Max frequency for clock   'usb_clk': 63.09 MHz (PASS at 60.00 MHz)
+Info: Max frequency for clock 'audio_clk': 83.83 MHz (PASS at 12.25 MHz)
+Info: Max frequency for clock       'clk': 166.14 MHz (PASS at 12.00 MHz)
+Info: Checksum: 0xcfbc80ee
+Info:     iter=1 wires=138175 overused=3474 overuse=3537 archfail=NA
+Info:     iter=2 wires=140467 overused=29 overuse=29 archfail=NA
+Info:     iter=3 wires=140506 overused=0 overuse=0 archfail=0
+Info: Checksum: 0x1ca8258f
+Info: Max frequency for clock   'usb_clk': 86.56 MHz (PASS at 60.00 MHz)
+Info: Max frequency for clock 'audio_clk': 79.20 MHz (PASS at 12.25 MHz)
+Info: Max frequency for clock       'clk': 153.26 MHz (PASS at 12.00 MHz)

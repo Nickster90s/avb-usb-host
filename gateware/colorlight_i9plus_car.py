@@ -131,6 +131,21 @@ class ColorlightI9PlusCAR(Elaboratable):
             usbpll_feedback = Signal()
             usb_clk_pll     = Signal()
             usb_pll_locked  = Signal()
+            # Route the ULPI clock through an EXPLICIT global buffer (BUFG)
+            # BEFORE the PLL CLKIN. A 7-series PLLE2 accepts a *direct*
+            # pin->CLKIN route ONLY from a clock-capable pin in the PLL's own
+            # clock region. Main's CLK (T4, bank 34) lands in-region so the
+            # direct connection works; the Backup CLK (W19, bank 14, P3 header)
+            # is in a DIFFERENT clock region, so the direct route is invalid and
+            # the PLL never locks -> solid LED even with a clean 60 MHz present
+            # at W19 (proven by the BUFG-based clock-test, which works on both
+            # pins because a BUFG reaches every region). A BUFG output is global,
+            # so feeding CLKIN from it lets the PLL lock from either bank.
+            # nextpnr-xilinx does NOT reliably auto-insert this buffer, so it is
+            # explicit. (2026-09-09, backup-USB P3 bring-up.)
+            usb_clkin_buf = Signal()
+            m.submodules.usb_clkin_bufg = Instance(
+                "BUFG", i_I=self.ulpi_clk_pin, o_O=usb_clkin_buf)
             m.submodules.usbpll = Instance("PLLE2_ADV",
                 p_BANDWIDTH         = "OPTIMIZED",
                 p_COMPENSATION      = "INTERNAL",
@@ -142,7 +157,7 @@ class ColorlightI9PlusCAR(Elaboratable):
                 p_CLKOUT0_DIVIDE    = 16,
                 p_CLKOUT0_PHASE     = self.usb_phase,
                 p_CLKOUT0_DUTY_CYCLE= 0.5,
-                i_CLKIN1   = self.ulpi_clk_pin,
+                i_CLKIN1   = usb_clkin_buf,
                 i_CLKFBIN  = usbpll_feedback,
                 o_CLKFBOUT = usbpll_feedback,
                 o_CLKOUT0  = usb_clk_pll,
@@ -159,6 +174,13 @@ class ColorlightI9PlusCAR(Elaboratable):
         else:
             # Raw ULPI clock straight to the usb domain. The tools
             # insert a BUFG. Matches ultraembedded's validated setup.
+            #
+            # NOTE (2026-10-14): an explicit BUFG here was TRIED and is NOT a
+            # fix for the breakout PHY-B failure -- the proven-working PHY-A
+            # build shows the SAME profile (1 BUFGCTRL, no dedicated-routing
+            # BUFG line), so the clock is buffered the same way on both. The
+            # apparent "2 vs 1 BUFG" difference was an artifact of comparing a
+            # full build against a USB_MINIMAL one (the audio domain adds one).
             m.d.comb += cd_usb.clk.eq(self.ulpi_clk_pin)
 
         # Until PLL is locked, hold sync/fast in reset. The usb domain

@@ -85,13 +85,20 @@ class USBDescriptors():
     CHCFG_DISCRETE = 0x00000000
 
     def __init__(self, *, product_name="N-Series AVB Switchover Main",
-                 serial="0", **_ignored):
+                 serial="0", product_id=0xEAB1, **_ignored):
         # **_ignored keeps the historical call sites working
         # (USBDescriptors(use_ila=..., ila_max_packet_size=...)); this
-        # device has no ILA. product_name/serial let a 2nd instance
-        # enumerate as a distinct "Backup" interface.
+        # device has no ILA. product_name/serial/product_id let a 2nd
+        # instance enumerate as a distinct "Backup" interface.
+        #
+        # A SEPARATE PID for the 2nd port is the upstream pattern this
+        # project descends from -- adat-usb2-audio-interface's descriptor
+        # does `idProduct = 0xADA1 if "USB1" in product_id else 0xADA2`.
+        # Two devices sharing one PID force every udev rule, ALSA config and
+        # DAW device list to disambiguate by serial string instead.
         self.product_name = product_name
         self.serial       = serial
+        self.product_id   = product_id
 
     # ---- public entry point (unchanged signature) ------------------------
     def create_usb2_descriptors(self, no_channels: int, max_packet_size: int):
@@ -115,7 +122,7 @@ class USBDescriptors():
             d.bDeviceSubclass    = 0x02
             d.bDeviceProtocol    = 0x01
             d.idVendor           = 0x1209    # pid.codes hobbyist VID
-            d.idProduct          = 0xEAB1    # EventsLight AVB bridge
+            d.idProduct          = self.product_id  # EAB1 Main / EAB2 Backup
             d.iManufacturer      = "EventsLight"
             d.iProduct           = self.product_name
             d.iSerialNumber      = self.serial
