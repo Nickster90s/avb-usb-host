@@ -51,6 +51,10 @@ class USBAVBSubsystem(Elaboratable):
     # async +1 jitter = 1344). High-bandwidth iso: base 768 (=4*192 frame) x 2
     # transactions = 1536 >= 1344. The descriptor encodes mult via wMaxPacketSize
     # bits 11-12 (usb_descriptors _packet_sizing); this is the per-xact base.
+    # 768 = de 48k-base (4 x 192B frame) x 2 transacties = 1536 >= 1344.
+    # Bij 96 kHz wordt dit 960 (5 frames) x 3 = 2880 >= 2496; dat is de door
+    # 4b66af2 HW-geverifieerde waarde, wMaxPacketSize 0x13C0 = 960 | 2<<11.
+    # Zie de sample_rate-parameter in __init__: die zet beide.
     MAX_PACKET_SIZE    = 768
     # Bridge FIFO: cd_usb → sys. 48ch @ 48K = 2304 samples/ms; size for several
     # high-bandwidth-iso uframes of headroom. 64-bit (lo+hi) entries.
@@ -58,8 +62,25 @@ class USBAVBSubsystem(Elaboratable):
 
     def __init__(self, *, standalone=False,
                  product_name="N-Series AVB Switchover Main", serial="0",
-                 product_id=0xEAB1):
+                 product_id=0xEAB1, sample_rate=48000, dual_rate=False):
         self.standalone     = standalone
+        # --- SAMPLE RATE -----------------------------------------------------
+        # sample_rate dimensioneert de ISO-endpoint: bytes/uframe =
+        # n*SUBSLOT_SIZE * (fs/8000 + 1). Bij 48ch/32-bit is dat 1344 B op 48k
+        # (2 x 768) en 2496 B op 96k (3 x 960). Defaults staan op 48000/False,
+        # zodat avb-aes3's bestaande Verilog byte-identiek regenereert.
+        #
+        # dual_rate=True dimensioneert op de MAX rate (96k) zodat diezelfde
+        # descriptors ook 48k dekken -- descriptors zitten in ROM en kunnen
+        # runtime niet wisselen -- en legt rate_48k_i naar buiten zodat de
+        # Dante-kant via een firmware-CSR kiest WELKE rate de clock source
+        # meldt. De host volgt; hij kiest niet. Zie de waarschuwing bij
+        # current_rate_48k in requesthandlers.py.
+        self.sample_rate    = sample_rate
+        self.dual_rate      = dual_rate
+        self._desc_rate     = 96000 if dual_rate else sample_rate
+        if dual_rate:
+            self.rate_48k_i = Signal()   # IN: 1 = 48 kHz, 0 = 96 kHz
         # USB device identity — parametrized so a 2nd instance (the A/B
         # "Backup" ULPI in avb-aes3) enumerates as a distinct interface.
         # Main = 1209:EAB1, Backup = 1209:EAB2, matching avb-usb-host's
@@ -121,7 +142,7 @@ class USBAVBSubsystem(Elaboratable):
             self.sample_overflow_count,
             self.dbg_rx_beats, self.dbg_ep_out,
             self.sample_strobe, self.block_level, self.fb_ovr,
-        ]
+        ] + ([self.rate_48k_i] if self.dual_rate else [])
 
     def elaborate(self, platform):
         m = Module()
@@ -199,17 +220,32 @@ class USBAVBSubsystem(Elaboratable):
         usb.data_clock = 60e6
 
         descriptors     = USBDescriptors(use_ila=False, ila_max_packet_size=512,
+                                         sample_rate=self._desc_rate,
                                          product_name=self._product_name,
                                          serial=self._serial,
                                          product_id=self._product_id)
+        # De per-transactie base MOET uit dezelfde som komen als de descriptor,
+        # anders framet de decoder op een andere grens dan de host zendt. Dus
+        # niet de klasse-constante gebruiken maar _out_packet bevragen.
+        mps = descriptors._out_packet(self.NUMBER_OF_CHANNELS)[0]
+        self.MAX_PACKET_SIZE = mps
         usb_descriptors = descriptors.create_usb2_descriptors(
-                              self.NUMBER_OF_CHANNELS, self.MAX_PACKET_SIZE)
+                              self.NUMBER_OF_CHANNELS, mps)
         control_ep = usb.add_control_endpoint()
         control_ep.add_standard_request_handlers(usb_descriptors, blacklist=[
             lambda setup: (setup.type    == USBRequestType.STANDARD)
                         & (setup.request == USBStandardRequests.SET_INTERFACE)
         ])
         uac2_handler = UAC2RequestHandlers()
+        # RATE-FOLLOW: de clock source meldt precies de rate die de Dante-kant
+        # heeft gekozen. Zonder dual_rate blijft dit 0 -> 96 kHz zou gemeld
+        # worden, dus bij een enkel-rate build pinnen we hem expliciet op de
+        # build-rate in plaats van hem te laten zweven.
+        if self.dual_rate:
+            m.d.comb += uac2_handler.current_rate_48k.eq(self.rate_48k_i)
+        else:
+            m.d.comb += uac2_handler.current_rate_48k.eq(
+                1 if self.sample_rate == 48000 else 0)
         control_ep.add_request_handler(uac2_handler)
 
         ep1_out = USBIsochronousOutStreamEndpoint(

@@ -62,10 +62,13 @@ class USBDescriptors():
     # sample-frame size (n*SUBSLOT_SIZE) so every transaction starts on a frame
     # boundary (the decoder keys framing off the per-transaction `first`). For
     # 48ch@48K@32B: frame=192, total=1344 -> base 768 x 2 transactions = 1536.
-    @classmethod
-    def _out_packet(cls, n: int):
-        frame = n * cls.SUBSLOT_SIZE
-        total = frame * (cls.SAMPLE_RATE // 8000 + 1)
+    def _out_packet(self, n: int):
+        # Was een @classmethod op cls.SAMPLE_RATE. Nu een instantiemethode,
+        # zodat een per-build rate (96k) de maat bepaalt zonder de klasse-
+        # attribuut globaal te muteren -- die mutatie zou elke andere instantie
+        # in hetzelfde proces meenemen.
+        frame = n * self.SUBSLOT_SIZE
+        total = frame * (self.SAMPLE_RATE // 8000 + 1)
         if total <= 1024:
             return total, total
         for k in (2, 3):
@@ -85,7 +88,7 @@ class USBDescriptors():
     CHCFG_DISCRETE = 0x00000000
 
     def __init__(self, *, product_name="N-Series AVB Switchover Main",
-                 serial="0", product_id=0xEAB1, **_ignored):
+                 serial="0", product_id=0xEAB1, sample_rate=None, **_ignored):
         # **_ignored keeps the historical call sites working
         # (USBDescriptors(use_ila=..., ila_max_packet_size=...)); this
         # device has no ILA. product_name/serial/product_id let a 2nd
@@ -96,6 +99,10 @@ class USBDescriptors():
         # does `idProduct = 0xADA1 if "USB1" in product_id else 0xADA2`.
         # Two devices sharing one PID force every udev rule, ALSA config and
         # DAW device list to disambiguate by serial string instead.
+        # Overschrijft het klasse-attribuut alleen voor DEZE instantie; bij
+        # None blijft de 48000-default gelden.
+        if sample_rate is not None:
+            self.SAMPLE_RATE = sample_rate
         self.product_name = product_name
         self.serial       = serial
         self.product_id   = product_id

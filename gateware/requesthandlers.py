@@ -20,6 +20,17 @@ class UAC2RequestHandlers(USBRequestHandler):
         self.output_interface_altsetting_nr = Signal(3)
         self.input_interface_altsetting_nr  = Signal(3)
         self.interface_settings_changed     = Signal()
+        # RATE-FOLLOW (port van branch usb-dac-96K32B, commit 66cf1df, daar
+        # HW-geverifieerd op 48k EN 96k). 0 = 96 kHz, 1 = 48 kHz. Gedreven van
+        # BUITEN: bij de DAC-top een build-default, in de bridge een firmware-CSR
+        # die de Dante/AVDECC-gekozen rate doorgeeft.
+        #
+        # LET OP -- NIET HOST-PROGRAMMEERBAAR MAKEN. Een eerdere poging liet de
+        # host de rate zetten via SET CUR(SAM_FREQ) en dat BRAK het streamen: de
+        # host kon de programmeerbare clock niet engageren en je kreeg stilte.
+        # De clock source meldt daarom precies EEN rate, read-only, en de host
+        # volgt. Zie 66cf1df.
+        self.current_rate_48k               = Signal()
 
     def elaborate(self, platform):
         m = Module()
@@ -80,9 +91,12 @@ class UAC2RequestHandlers(USBRequestHandler):
                       & (setup.index == Const(USBDescriptors.CLOCK_ID << 8, 16))
         request_clock_valid    = clock_valid    & setup.is_in_request
 
-        SRATE_44_1k = Const(44100, 32)
         SRATE_48k   = Const(48000, 32)
+        SRATE_96k   = Const(96000, 32)
         ZERO        = Const(0, 32)
+        # Gewone Python-expressie (geen m.d-statement), zodat de If/Elif-keten
+        # hieronder niet breekt.
+        cur_rate    = Mux(self.current_rate_48k, SRATE_48k, SRATE_96k)
 
         with m.Elif(setup.type == USBRequestType.CLASS):
             # Claim ALL class requests — this device owns the audio class
@@ -95,10 +109,8 @@ class UAC2RequestHandlers(USBRequestHandler):
                     with m.If(request_clock_freq):
                         m.d.comb += [
                             Cat(transmitter.data).eq(
-                                Cat(Const(0x1,   16),   # no triples
-                                    SRATE_48k,   # MIN
-                                    SRATE_48k,   # MAX
-                                    ZERO)),      # RES
+                                Cat(Const(0x1, 16),              # wNumSubRanges = 1
+                                    cur_rate, cur_rate, ZERO)),  # de ene actieve rate
                             transmitter.max_length.eq(setup.length)
                         ]
                     with m.Else():
@@ -116,7 +128,8 @@ class UAC2RequestHandlers(USBRequestHandler):
                     m.d.comb += transmitter.stream.attach(self.interface.tx)
                     with m.If(request_clock_freq & (setup.length == 4)):
                         m.d.comb += [
-                            Cat(transmitter.data[0:4]).eq(Const(48000, 32)),
+                            # GET CUR(SAM_FREQ) -> de nu geselecteerde rate.
+                            Cat(transmitter.data[0:4]).eq(cur_rate),
                             transmitter.max_length.eq(4)
                         ]
                     with m.Elif(request_clock_valid & (setup.length == 1)):
