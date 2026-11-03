@@ -94,8 +94,17 @@ class UAC2RequestHandlers(USBRequestHandler):
         SRATE_48k   = Const(48000, 32)
         SRATE_96k   = Const(96000, 32)
         ZERO        = Const(0, 32)
-        # Gewone Python-expressie (geen m.d-statement), zodat de If/Elif-keten
-        # hieronder niet breekt.
+        # Combinatorische Mux, en dat is OPZETTELIJK upstream: een m.d-statement
+        # hier breekt de If/Elif-keten hieronder ("Elif without preceding If").
+        # Ik heb geprobeerd dit te registreren om de 32-bits mux van het
+        # kritieke pad in cd_usb te halen, en dat liep op twee fouten uit --
+        # eerst m.d.sync, wat in deze module NIET usb is, en daarna de
+        # kapotte keten. Beide stonden al in het commentaar hier.
+        #
+        # En het was een AANNAME: dat deze mux het kritieke pad is, is niet
+        # gemeten. nextpnr rapporteert het kritieke pad in de build-log; zoek
+        # het daar op voordat je hier iets herschrijft. Wil het alsnog, zet de
+        # m.d.usb-toekenning dan VOOR het begin van de If/Elif-keten.
         cur_rate    = Mux(self.current_rate_48k, SRATE_48k, SRATE_96k)
 
         with m.Elif(setup.type == USBRequestType.CLASS):
