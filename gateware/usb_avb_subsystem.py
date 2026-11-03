@@ -248,8 +248,28 @@ class USBAVBSubsystem(Elaboratable):
                 1 if self.sample_rate == 48000 else 0)
         control_ep.add_request_handler(uac2_handler)
 
+        # BUFFER_SIZE MOET EXPLICIET. LUNA's default is max_packet_size * 2, en
+        # zijn eigen docstring zegt wat er dan gebeurt: "if there isn't ...
+        # space in the endpoint buffer, this endpoint will SILENTLY DISCARD the
+        # extraneous data", met de aanbeveling "typically three
+        # max-packet-sizes or more".
+        #
+        # Bij 48ch/96k/32B levert de host 3 transacties van 960 B per
+        # microframe = 2880 B, en de default buffer was 1920 B. Dus twee van de
+        # drie transacties pasten en de derde verdween, stil.
+        #
+        # Gemeten op dante-usb 2026-11-03 met een 48-kanaals toon, voordat dit
+        # erin stond:
+        #   96 kHz: rx_beats 18.095.268/s -> ep_out 12.645.453/s = 68,6%
+        #           oftewel 2/3, met block_level 23 en 30.129 underruns/s
+        #   48 kHz: 2 x 768 = 1536 B tegen een buffer van precies 1536 -- nul
+        #           marge, en daar al 7% verlies dat de ring nog net overleefde
+        #
+        # x3 is het gedocumenteerde minimum. Loopt het hierna nog, dan is x4 de
+        # knop -- niet de feedback-lus, die compenseert een leak alleen maar.
         ep1_out = USBIsochronousOutStreamEndpoint(
-            endpoint_number=1, max_packet_size=self.MAX_PACKET_SIZE)
+            endpoint_number=1, max_packet_size=self.MAX_PACKET_SIZE,
+            buffer_size=self.MAX_PACKET_SIZE * 3)
         usb.add_endpoint(ep1_out)
         ep1_in = USBIsochronousInMemoryEndpoint(
             endpoint_number=1, max_packet_size=4)
@@ -448,10 +468,33 @@ class USBAVBSubsystem(Elaboratable):
         CENTRE  = 64
         err     = Signal(signed(9))
         m.d.comb += err.eq(CENTRE - level_usb)
-        NOMINAL = 0x0006_0000
-        FB_LO   = NOMINAL - 0x8000           # 0x58000
-        FB_HI   = NOMINAL + 0x8000           # 0x68000
         nco_rate = Signal(20, reset=1536)    # held NCO strobes/256-SOF (48k -> 1536)
+
+        # DE KLEM IS RELATIEF AAN DE GEMETEN SNELHEID, NIET ABSOLUUT.
+        # Dit stond hardcoded:
+        #     NOMINAL = 0x0006_0000           # 6,0 samples/uframe = 48 kHz
+        #     FB_LO/FB_HI = NOMINAL +- 0x8000 # 5,5 .. 6,5
+        # Op 96 kHz meet deze lus zijn consumptie correct -- nco_rate loopt naar
+        # 3072 en (nco_rate << 8) is dan 0xC0000 = 12,0 -- maar de klem sneed dat
+        # af op 6,5. En het commentaar hierboven zegt precies waarom dat fataal
+        # is: de klem bestaat om BINNEN Linux' accept-window te blijven. 6,5 ligt
+        # op 96 kHz ver buiten dat window, dus de host VERWERPT de feedback en
+        # draait open-loop op nominaal. Dan houdt niets de ring gecentreerd.
+        #
+        # Gemeten op dante-usb, 2026-11-03, 48 kanalen tone op kanaal 1:
+        #           48 kHz            96 kHz
+        #   ingress +1,97%            +8,28%   (host zonder correctie)
+        #   overrun       0/s         616.448/s
+        #   underrun      0/s           4.279/s
+        #   block_level  64 (= CENTRE)      25
+        #
+        # +-(nom >> 4) is +-6,25% bij BEIDE rates, ruim binnen Linux' +-12,5%.
+        _fb_nom = Signal(32)
+        _fb_win = Signal(32)
+        m.d.comb += _fb_nom.eq(nco_rate << 8)
+        m.d.comb += _fb_win.eq(_fb_nom >> 4)
+        FB_LO   = _fb_nom - _fb_win
+        FB_HI   = _fb_nom + _fb_win
 
         # CLAMPED INTEGRAL (re-added 2026-06-24). HW-measured via the fb_ovr sweep:
         # the host honors async feedback but delivers ~0.5% UNDER nominal (ep_out
@@ -465,6 +508,15 @@ class USBAVBSubsystem(Elaboratable):
         # center (|err|<=32), so the startup prime (err=64, ring empty) can't wind
         # it up. Requires block_level un-capped to 0..128 (aaf_packetizer) so err is
         # SYMMETRIC and the loop can pull a full ring back down.
+        # DE GAINS ZIJN RELATIEF AAN NOMINAAL, DUS ZE MOETEN MEESCHALEN.
+        # err<<6 en INTEG_MAX zijn getuned op 48 kHz, waar nominaal 0x60000 is.
+        # Op 96 kHz is nominaal 0xC0000, dus exact dezelfde absolute trim is de
+        # HELFT van de relatieve autoriteit. Gemeten op dante-usb 2026-11-03,
+        # na de endpoint-bufferfix en met deze gains nog ongeschaald: de ring
+        # zakte in 70 s van 64 naar 54 en gaf 5.667 underruns/s bij een host die
+        # +1,3% leverde -- err<<6 was daar 0,08% trim, te zwak om terug te
+        # trekken. Een shift meer bij 96 kHz herstelt de relatieve gain.
+        _rate96 = ~self.current_rate_48k
         KI_SHIFT  = 6
         INTEG_MAX = 0x2000 << KI_SHIFT       # ±2.08% of nominal feedback authority
         integ     = Signal(signed(24))
@@ -473,7 +525,15 @@ class USBAVBSubsystem(Elaboratable):
 
         fb_new   = Signal(signed(34))
         fb_clamp = Signal(32)
-        m.d.comb += fb_new.eq((nco_rate << 8) + (err << 6) + (integ >> KI_SHIFT))
+        # err<<7 op 96 kHz, err<<6 op 48 -- zie _rate96 hierboven. Idem voor de
+        # integrale bijdrage, die dezelfde relatieve autoriteit moet houden.
+        _p_term = Signal(signed(20))
+        _i_term = Signal(signed(24))
+        m.d.comb += _p_term.eq(Mux(_rate96, err << 7, err << 6))
+        m.d.comb += _i_term.eq(Mux(_rate96,
+                                   (integ >> (KI_SHIFT - 1)),
+                                   (integ >> KI_SHIFT)))
+        m.d.comb += fb_new.eq((nco_rate << 8) + _p_term + _i_term)
         with m.If(fb_new < FB_LO):
             m.d.comb += fb_clamp.eq(FB_LO)
         with m.Elif(fb_new > FB_HI):
