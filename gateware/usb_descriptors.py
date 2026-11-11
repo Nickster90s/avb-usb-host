@@ -43,6 +43,99 @@ from usb_protocol.emitters                import DeviceDescriptorCollection
 from usb_protocol.emitters.descriptors    import uac2, standard
 
 
+# ---------------------------------------------------------------------------
+# HID (KVM): one interface, one interrupt IN endpoint, keyboard + mouse.
+#
+# WHY HERE AND NOT IN usb_protocol: there is no hid.py in
+# usb_protocol/emitters/descriptors/ -- it ships standard, cdc, uac1/2/3,
+# midi1/2 and microsoft10. The standard interface and endpoint descriptors come
+# from InterfaceDescriptorEmitter/EndpointDescriptorEmitter as usual; the HID
+# class descriptor (type 0x21) and the report descriptor (type 0x22) are raw
+# bytes. add_subordinate_descriptor() takes bytes-like objects and keys its type
+# count off byte 1, so a raw 0x21 does not disturb the endpoint count.
+#
+# REPORT IDs, NOT BOOT PROTOCOL, AND THAT IS A TRADE WORTH KNOWING. Report IDs
+# let keyboard and mouse share one interface and one endpoint, which is what
+# "one HID device per PHY" asks for. The cost is that bInterfaceSubClass must be
+# 0, so this is NOT a boot-protocol device: a BIOS or UEFI setup screen that
+# only speaks boot protocol will not see it. If that is needed later it is a
+# SECOND interface with subclass 1, protocol 1, no report IDs and a fixed 8-byte
+# keyboard report -- not a change to this descriptor.
+HID_REPORT_DESCRIPTOR = bytes([
+    # ---- Report ID 1: keyboard, boot-protocol-compatible layout -----------
+    0x05, 0x01,        # Usage Page (Generic Desktop)
+    0x09, 0x06,        # Usage (Keyboard)
+    0xA1, 0x01,        # Collection (Application)
+    0x85, 0x01,        #   Report ID (1)
+    0x05, 0x07,        #   Usage Page (Keyboard/Keypad)
+    0x19, 0xE0,        #   Usage Minimum (LeftControl)
+    0x29, 0xE7,        #   Usage Maximum (Right GUI)
+    0x15, 0x00,        #   Logical Minimum (0)
+    0x25, 0x01,        #   Logical Maximum (1)
+    0x75, 0x01,        #   Report Size (1)
+    0x95, 0x08,        #   Report Count (8)
+    0x81, 0x02,        #   Input (Data,Var,Abs)      -- modifier byte
+    0x95, 0x01,        #   Report Count (1)
+    0x75, 0x08,        #   Report Size (8)
+    0x81, 0x01,        #   Input (Cst,Ary,Abs)       -- reserved byte
+    0x95, 0x06,        #   Report Count (6)
+    0x75, 0x08,        #   Report Size (8)
+    0x15, 0x00,        #   Logical Minimum (0)
+    0x25, 0x65,        #   Logical Maximum (101)
+    0x05, 0x07,        #   Usage Page (Keyboard/Keypad)
+    0x19, 0x00,        #   Usage Minimum (0)
+    0x29, 0x65,        #   Usage Maximum (101)
+    0x81, 0x00,        #   Input (Data,Ary,Abs)      -- 6 key codes
+    0xC0,              # End Collection
+    # ---- Report ID 2: mouse, 3 buttons + X/Y + wheel ----------------------
+    0x05, 0x01,        # Usage Page (Generic Desktop)
+    0x09, 0x02,        # Usage (Mouse)
+    0xA1, 0x01,        # Collection (Application)
+    0x85, 0x02,        #   Report ID (2)
+    0x09, 0x01,        #   Usage (Pointer)
+    0xA1, 0x00,        #   Collection (Physical)
+    0x05, 0x09,        #     Usage Page (Button)
+    0x19, 0x01,        #     Usage Minimum (1)
+    0x29, 0x03,        #     Usage Maximum (3)
+    0x15, 0x00,        #     Logical Minimum (0)
+    0x25, 0x01,        #     Logical Maximum (1)
+    0x95, 0x03,        #     Report Count (3)
+    0x75, 0x01,        #     Report Size (1)
+    0x81, 0x02,        #     Input (Data,Var,Abs)
+    0x95, 0x01,        #     Report Count (1)
+    0x75, 0x05,        #     Report Size (5)
+    0x81, 0x01,        #     Input (Cst,Ary,Abs)     -- padding
+    0x05, 0x01,        #     Usage Page (Generic Desktop)
+    0x09, 0x30,        #     Usage (X)
+    0x09, 0x31,        #     Usage (Y)
+    0x09, 0x38,        #     Usage (Wheel)
+    0x15, 0x81,        #     Logical Minimum (-127)
+    0x25, 0x7F,        #     Logical Maximum (127)
+    0x75, 0x08,        #     Report Size (8)
+    0x95, 0x03,        #     Report Count (3)
+    0x81, 0x06,        #     Input (Data,Var,Rel)
+    # PAD THE MOUSE TO THE SAME LENGTH AS THE KEYBOARD. Both reports are now
+    # 1 ID byte + 8 data bytes = 9. That is not cosmetic: the endpoint is a
+    # USBSignalInEndpoint, which relays a FIXED-width signal on every poll, so
+    # two different report lengths cannot share it. Padding here is legal and
+    # declared; sending 9 bytes for a report the descriptor calls 5 would not
+    # be.
+    0x95, 0x04,        #     Report Count (4)
+    0x75, 0x08,        #     Report Size (8)
+    0x81, 0x01,        #     Input (Cst,Ary,Abs)  -- padding to a fixed 8 bytes
+    0xC0,              #   End Collection
+    0xC0,              # End Collection
+])
+
+# EVERY report is this long, including its ID byte: 1 + 8. Keyboard is
+# ID + modifiers + reserved + 6 keycodes; the mouse is padded to match.
+HID_REPORT_BYTES = 9
+# EP 0x01 iso OUT (audio), 0x81 iso IN (feedback), 0x82 iso IN (capture stub)
+# are taken. 0x83 is the first free IN address.
+HID_ENDPOINT_NUMBER   = 3
+HID_DESCRIPTOR_TYPE   = 0x21
+HID_REPORT_DESC_TYPE  = 0x22
+
 class USBDescriptors():
     # Referenced by requesthandlers.py (clock-frequency control target).
     CLOCK_ID = 1
@@ -108,6 +201,42 @@ class USBDescriptors():
         self.product_id   = product_id
 
     # ---- public entry point (unchanged signature) ------------------------
+    @staticmethod
+    def playback_only() -> bool:
+        """Whether the capture (IN) streaming interface is emitted.
+
+        Capture is DROPPED by default and the reason is measured: macOS opens
+        the device full-duplex and runs capture alongside playback on one IO
+        work loop, and EP 0x82 delivers no real audio yet, so it starves the
+        loop -> Audio IO Overload -> silence at ~2 s. Linux never hit it because
+        aplay opens playback-only. HW-VERIFIED 2026-06-05.
+        """
+        import os
+        return os.environ.get("PLAYBACK_ONLY", "1") == "1"
+
+    @classmethod
+    def n_audio_interfaces(cls) -> int:
+        """How many interfaces the audio function occupies, starting at 0.
+
+        THE SINGLE PLACE THIS IS DECIDED, because it is not a constant: it
+        follows PLAYBACK_ONLY. 2 in the shipping device (IF0 AudioControl, IF1
+        playback) and 3 with PLAYBACK_ONLY=0, which inserts IF2 capture. The
+        number appears in three places that must agree -- the HID interface's
+        own bInterfaceNumber, the Interface Association's bInterfaceCount, and
+        UAC2RequestHandlers' claim boundary -- so all three read it from here.
+        """
+        return 2 if cls.playback_only() else 3
+
+    @staticmethod
+    def hid_enabled() -> bool:
+        import os
+        return os.environ.get("KVM_HID", "1") == "1"
+
+    @classmethod
+    def hid_interface_number(cls) -> int:
+        """The HID interface's number: the first one after the audio function."""
+        return cls.n_audio_interfaces()
+
     def create_usb2_descriptors(self, no_channels: int, max_packet_size: int):
         # Capture (IN) streaming interface is DROPPED by default (playback-only
         # device). ROOT CAUSE of the macOS "~2 s then silence" failure: macOS
@@ -119,8 +248,7 @@ class USBDescriptors():
         # worked. HW-VERIFIED 2026-06-05: playback-only = clean continuous audio
         # on BOTH macOS and Linux. Re-enable capture with PLAYBACK_ONLY=0 once
         # EP 0x82 carries a real stream.
-        import os
-        playback_only = os.environ.get("PLAYBACK_ONLY", "1") == "1"
+        playback_only = self.playback_only()
         descriptors = DeviceDescriptorCollection()
 
         with descriptors.DeviceDescriptor() as d:
@@ -157,7 +285,70 @@ class USBDescriptors():
             if not playback_only:
                 self._streaming_in(cfg, no_channels, max_packet_size)
 
+            # KVM_HID=0 leaves the HID interface out entirely, which is the
+            # ONLY way to get a clean "before" netlist from the current source.
+            # It exists because the committed .v pair predates this source and
+            # cannot be regenerated from it, so "it placed before" is a
+            # measurement against a stale artifact -- see KVM_HANDOFF.md. If
+            # placement fails, build both ways from the SAME source before
+            # blaming HID.
+            #
+            # HID (KVM), on the first interface after the audio function. It is
+            # deliberately OUTSIDE the Interface Association above: the IAD
+            # covers the audio function only, and HID is a separate function on
+            # the same device.
+            if self.hid_enabled():
+                self._hid_interface(cfg, descriptors)
+
         return descriptors
+
+    # ---- HID: keyboard + mouse on one interrupt IN endpoint ---------------
+    def _hid_interface(self, cfg, descriptors):
+        hid_if = self.hid_interface_number()
+
+        std = standard.InterfaceDescriptorEmitter()
+        std.bInterfaceNumber   = hid_if
+        std.bAlternateSetting  = 0
+        std.bInterfaceClass    = 0x03      # HID
+        std.bInterfaceSubclass = 0x00      # not boot protocol -- see the
+        std.bInterfaceProtocol = 0x00      # note at HID_REPORT_DESCRIPTOR
+        # An index, NOT a string: this emitter is built standalone and added
+        # with add_subordinate_descriptor(), so InterfaceDescriptorEmitter's
+        # _pre_emit never runs ensure_string_field_is_index() (it only does that
+        # when it has a collection). Register the string here instead.
+        std.iInterface         = descriptors.ensure_string_field_is_index(
+                                     "KVM Control")
+
+        # HID class descriptor, raw: usb_protocol has no emitter for type 0x21.
+        rl = len(HID_REPORT_DESCRIPTOR)
+        std.add_subordinate_descriptor(bytes([
+            9,                          # bLength
+            HID_DESCRIPTOR_TYPE,        # bDescriptorType = 0x21
+            0x11, 0x01,                 # bcdHID 1.11
+            0x00,                       # bCountryCode = not localised
+            0x01,                       # bNumDescriptors
+            HID_REPORT_DESC_TYPE,       # bDescriptorType = 0x22
+            rl & 0xFF, (rl >> 8) & 0xFF # wDescriptorLength
+        ]))
+
+        with std.EndpointDescriptor() as ep:
+            ep.bEndpointAddress = USBDirection.IN.to_endpoint_address(
+                                      HID_ENDPOINT_NUMBER)          # 0x83
+            ep.bmAttributes     = 0x03                              # interrupt
+            ep.wMaxPacketSize   = 16                                # >= 9
+            # HIGH SPEED: bInterval is 2^(n-1) microframes, NOT milliseconds.
+            # 4 -> 8 uframes -> 1 ms, which is what a KVM wants. A value copied
+            # from a full-speed example (where it IS milliseconds) would ask for
+            # 2^(n-1) uframes and be wrong by orders of magnitude.
+            ep.bInterval        = 4
+
+        cfg.add_subordinate_descriptor(std)
+
+        # Register the report descriptor so GET_DESCRIPTOR(0x22) serves it.
+        # LUNA's standard handler ignores the recipient and wIndex, so this
+        # needs no handler of its own.
+        descriptors.add_descriptor(HID_REPORT_DESCRIPTOR, index=0,
+                                   descriptor_type=HID_REPORT_DESC_TYPE)
 
     # ---- AudioControl: clock + 4 terminals -------------------------------
     def _audio_control_interface(self, n: int, playback_only: bool = False):

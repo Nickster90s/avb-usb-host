@@ -14,8 +14,20 @@ class VendorRequests(IntEnum):
 
 class UAC2RequestHandlers(USBRequestHandler):
     """ request handlers to implement UAC2 functionality. """
-    def __init__(self):
+    def __init__(self, n_audio_interfaces: int = 2):
+        """n_audio_interfaces: how many interfaces the audio function occupies,
+        starting at 0. This handler claims class requests ONLY for those, so a
+        second class on a later interface (HID) can be served by its own
+        handler. It is 2 in the shipping playback-only device (IF0
+        AudioControl + IF1 playback) and 3 with PLAYBACK_ONLY=0, which adds the
+        capture interface -- so it is NOT a constant, it follows an environment
+        variable, and usb_descriptors.USBDescriptors.n_audio_interfaces() is the
+        one place that decides. Passing it in rather than hardcoding is the
+        point: the number appears in the descriptors too and the two must agree.
+        """
         super().__init__()
+
+        self.n_audio_interfaces = n_audio_interfaces
 
         self.output_interface_altsetting_nr = Signal(3)
         self.input_interface_altsetting_nr  = Signal(3)
@@ -43,6 +55,33 @@ class UAC2RequestHandlers(USBRequestHandler):
 
         m.d.usb += self.interface_settings_changed.eq(0)
 
+        # Computed BEFORE the If/Elif chain on purpose: an m.d statement inside
+        # one breaks it with "Elif without preceding If" (see cur_rate below),
+        # and a Signal assigned mid-chain is the same trap in a different coat.
+        audio_class_request = Signal()
+        # THREE BITS, AND A `!=` RATHER THAN A `<`. The obvious form,
+        # `setup.index < self.n_audio_interfaces`, compares all SIXTEEN bits of
+        # wIndex against a constant, and yosys builds that as a CARRY4 chain.
+        # Measured 2026-11-11: that chain landed on cd_usb's critical path --
+        #     request_mux_index -> LUT -> $lt$...v:9596 CARRY4 -> LUT ->
+        #     endpoint_mux.tx_mux -> tx_data
+        # -- and the usb domain fell to 45.77 MHz against the 60 the ULPI bus
+        # needs (the known-good build measures 67.71). The claim used to be a
+        # constant 1 under CLASS, so narrowing it by interface number is what
+        # introduced a comparator into a path that had none.
+        #
+        # Only THREE low bits are compared, and against the HID interface
+        # number, because that is all the discrimination the device can need:
+        # the interfaces that exist are 0..2 (0..3 with PLAYBACK_ONLY=0). A
+        # class request aimed at a nonexistent interface is then claimed by
+        # audio and STALLed by the Default below -- exactly what happened before
+        # this handler learned to discriminate at all, so nothing regresses.
+        m.d.comb += audio_class_request.eq(
+            ((setup.recipient == USBRequestRecipient.INTERFACE)
+             & (setup.index[0:3] != self.n_audio_interfaces))
+            | (setup.recipient == USBRequestRecipient.ENDPOINT)
+            | (setup.recipient == USBRequestRecipient.DEVICE))
+
         #
         # Class request handlers.
         #
@@ -58,11 +97,24 @@ class UAC2RequestHandlers(USBRequestHandler):
                 interface_nr   = setup.index
                 alt_setting_nr = setup.value
 
-                m.d.usb += [
-                    self.output_interface_altsetting_nr.eq(0),
-                    self.input_interface_altsetting_nr.eq(0),
-                    self.interface_settings_changed.eq(1),
-                ]
+                # TOUCH ONLY THE INTERFACE THAT WAS ADDRESSED.
+                #
+                # This used to zero BOTH altsetting registers here, before the
+                # Switch, and then set one of them inside it. So a SET_INTERFACE
+                # to any interface other than 1 or 2 -- IF0, the AudioControl
+                # interface, which a host may legitimately address -- cleared
+                # both and restored neither. Zeroing was also redundant for the
+                # interface being addressed: SET_INTERFACE to altsetting 0 is
+                # already `eq(alt_setting_nr)` with alt_setting_nr == 0.
+                #
+                # It has not been causing silence, and the reason is worth
+                # writing down because it is also a warning: NOTHING IN
+                # usb_avb_subsystem.py READS THESE SIGNALS. The only reader in
+                # the tree is usb_utmi_top.py:309, a bench top; LUNA's
+                # isochronous endpoints gate themselves. So the bug was latent
+                # and would have surfaced the day someone wired them up --
+                # which is exactly when it would have been hardest to find.
+                m.d.usb += self.interface_settings_changed.eq(1)
 
                 with m.Switch(interface_nr):
                     with m.Case(1):
@@ -107,9 +159,30 @@ class UAC2RequestHandlers(USBRequestHandler):
         # m.d.usb-toekenning dan VOOR het begin van de If/Elif-keten.
         cur_rate    = Mux(self.current_rate_48k, SRATE_48k, SRATE_96k)
 
-        with m.Elif(setup.type == USBRequestType.CLASS):
-            # Claim ALL class requests — this device owns the audio class
-            # space; unknown ones fall to the Default stall below.
+        # NOTE the parentheses: `&` binds tighter than `==` in Python, so
+        # `setup.type == USBRequestType.CLASS & audio_class_request` parses as
+        # `setup.type == (CLASS & audio_class_request)` and silently compares
+        # against nonsense. Written without them first.
+        with m.Elif((setup.type == USBRequestType.CLASS) & audio_class_request):
+            # CLAIM ONLY THE AUDIO FUNCTION'S CLASS REQUESTS.
+            #
+            # This used to claim ALL of them, with the comment "this device owns
+            # the audio class space; unknown ones fall to the Default stall
+            # below" -- true while audio was the only class here, and a wall the
+            # moment it is not. Every class request was claimed and anything
+            # this Switch did not recognise was STALLed, so a second class on a
+            # later interface never saw its own requests at all.
+            #
+            # THE REQUEST CODE CANNOT TELL THEM APART. HID's GET_REPORT is
+            # request 0x01 and so is Audio's CUR; SET_REPORT is 0x09. The
+            # discriminator is setup.index -- the interface number for an
+            # INTERFACE-recipient request, which is what the HID spec uses for
+            # every one of its class requests. Hence audio_class_request above.
+            #
+            # Endpoint-recipient class requests stay ours: the audio endpoints
+            # are the only ones that take them (HID speaks to its interface),
+            # and wIndex is an endpoint address there, not an interface number,
+            # so the comparison below would be meaningless.
             m.d.comb += interface.claim.eq(1)
             with m.Switch(setup.request):
                 with m.Case(AudioClassSpecificRequestCodes.RANGE):

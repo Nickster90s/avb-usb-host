@@ -30,10 +30,13 @@ from amlib.utils       import EdgeToPulse
 from luna.gateware.usb.usb2.device   import USBDevice
 from luna.gateware.interface.utmi    import UTMIInterface
 from luna.usb2                       import USBIsochronousOutStreamEndpoint, \
-                                            USBIsochronousInMemoryEndpoint
+                                            USBIsochronousInMemoryEndpoint, \
+                                            USBSignalInEndpoint
 from usb_protocol.types              import USBRequestType, USBStandardRequests
 
-from usb_descriptors                 import USBDescriptors
+from usb_descriptors                 import USBDescriptors, \
+                                            HID_REPORT_BYTES, \
+                                            HID_ENDPOINT_NUMBER
 from requesthandlers                 import UAC2RequestHandlers
 from usb_stream_to_channels          import USBStreamToChannels
 
@@ -117,6 +120,21 @@ class USBAVBSubsystem(Elaboratable):
         # MEASURED + computed inside this wrapper, SOF-synchronised (ADAT/LUNA
         # canonical topology) — see elaborate(). The fabric just supplies the
         # media-clock tick and the consumer-FIFO level.
+        # --- HID (KVM) report, driven from the sys domain ---
+        # 9 bytes: the report ID plus 8 data bytes, the same length for keyboard
+        # (ID 1) and mouse (ID 2) -- see HID_REPORT_DESCRIPTOR. The endpoint
+        # relays whatever is here on EVERY host poll (1 ms), which is correct
+        # HID semantics for a state report: a held key keeps being reported
+        # until the firmware changes it. So the firmware drives STATE, not a
+        # queue, and needs no "report sent" acknowledgement -- which also keeps
+        # a pulse from having to cross cd_usb -> sys, a crossing nextpnr would
+        # time as a real path because it ignores set_false_path.
+        #
+        # Byte 0 is the report ID. All zeroes is the idle state for both report
+        # IDs, and report ID 0 is not declared, so a report of all zeroes is
+        # simply never sent as a valid report by a host's parser.
+        self.hid_report             = Signal(HID_REPORT_BYTES * 8)  # IN (sys)
+
         self.sample_strobe          = Signal()       # input: MCR fs strobe (media clock)
         self.block_level            = Signal(8)       # input: consumer FIFO occupancy (0..depth)
         self.fb_ovr                 = Signal(32)      # input: firmware feedback OVERRIDE (0=auto)
@@ -142,6 +160,13 @@ class USBAVBSubsystem(Elaboratable):
             self.sample_overflow_count,
             self.dbg_rx_beats, self.dbg_ep_out,
             self.sample_strobe, self.block_level, self.fb_ovr,
+            # HID (KVM). A Signal that is NOT in this list does not become a
+            # module port: Amaranth sees it driven by nothing and optimises it to
+            # a constant. The first regeneration did exactly that -- the Verilog
+            # had `wire [71:0] hid_report; assign hid_report = 72'h0;` and the
+            # firmware would have had nothing to write to, with no error
+            # anywhere. Declaring the Signal is not the same as exporting it.
+            self.hid_report,
         ] + ([self.rate_48k_i] if self.dual_rate else [])
 
     def elaborate(self, platform):
@@ -236,7 +261,10 @@ class USBAVBSubsystem(Elaboratable):
             lambda setup: (setup.type    == USBRequestType.STANDARD)
                         & (setup.request == USBStandardRequests.SET_INTERFACE)
         ])
-        uac2_handler = UAC2RequestHandlers()
+        # The claim boundary and the HID interface number are the SAME number,
+        # read from the one place that decides it (it follows PLAYBACK_ONLY).
+        uac2_handler = UAC2RequestHandlers(
+            n_audio_interfaces=USBDescriptors.n_audio_interfaces())
         # RATE-FOLLOW: de clock source meldt precies de rate die de Dante-kant
         # heeft gekozen. Zonder dual_rate blijft dit 0 -> 96 kHz zou gemeld
         # worden, dus bij een enkel-rate build pinnen we hem expliciet op de
@@ -274,6 +302,30 @@ class USBAVBSubsystem(Elaboratable):
         ep1_in = USBIsochronousInMemoryEndpoint(
             endpoint_number=1, max_packet_size=4)
         usb.add_endpoint(ep1_in)
+
+        # HID (KVM) interrupt IN on EP 0x83. USBSignalInEndpoint relays a
+        # fixed-width signal on each poll, which is exactly a state report; its
+        # signal_domain= does the cd_usb synchronisation for us, so this is the
+        # ONE place the HID path crosses domains and it is done properly.
+        #
+        # EP 0x01 (iso OUT audio), 0x81 (iso IN feedback) and 0x82 (iso IN
+        # capture stub) are taken; HID_ENDPOINT_NUMBER is 3.
+        # KVM_HID=0 LEAVES THE ENDPOINT OUT, NOT JUST THE DESCRIPTOR.
+        # It used to be unconditional here while usb_descriptors.py honoured the
+        # switch, so KVM_HID=0 dropped 156 descriptor bytes and kept the whole
+        # 72-bit endpoint, its cd_usb synchroniser and its extra leg in
+        # endpoint_mux.tx_mux. The A/B measurement that KVM_HANDOFF.md asks for
+        # -- what does HID actually cost the placer -- could not be taken that
+        # way. The port stays in ports() either way so avb_soc.py's
+        # i_hid_report connection is valid in both builds.
+        if USBDescriptors.hid_enabled():
+            ep3_in = USBSignalInEndpoint(
+                width=HID_REPORT_BYTES * 8,
+                endpoint_number=HID_ENDPOINT_NUMBER,
+                endianness="little",
+                signal_domain="sys")
+            m.d.comb += ep3_in.signal.eq(self.hid_report)
+            usb.add_endpoint(ep3_in)
 
         # The decoder MUST run in the USB (cd_usb) domain — same as the EP that
         # feeds it (ep1_out) and the bridge_fifo WRITE side (w_domain="usb").
@@ -516,7 +568,28 @@ class USBAVBSubsystem(Elaboratable):
         # zakte in 70 s van 64 naar 54 en gaf 5.667 underruns/s bij een host die
         # +1,3% leverde -- err<<6 was daar 0,08% trim, te zwak om terug te
         # trekken. Een shift meer bij 96 kHz herstelt de relatieve gain.
-        _rate96 = ~self.current_rate_48k
+        # THE GENERATOR WAS BROKEN AT HEAD AND NOBODY NOTICED, BECAUSE NOBODY
+        # REGENERATED. This read `~self.current_rate_48k`, and the subsystem has
+        # no such attribute -- only UAC2RequestHandlers does. The line is
+        # unconditional in elaborate(), so `gen_usb_subsystem.py --main` failed
+        # with AttributeError both with and without --dual-rate. Found
+        # 2026-11-07 on the first regeneration in a while.
+        #
+        # WHICH MEANS THE COMMITTED rtl/usb_avb_subsystem{,2}.v COULD NOT HAVE
+        # COME FROM THE COMMITTED SOURCE. They carry the rate_48k_i port, so
+        # they were emitted with --dual-rate from an earlier state of this file.
+        # Treat that pair as an artifact whose provenance is the git history,
+        # not as something this source reproduces -- and regenerate both
+        # variants whenever this file changes, which is the only way the two
+        # ever agree again.
+        #
+        # The rate comes from the same source the request handler gets it from
+        # (see the rate-follow block above): the external pin when the build is
+        # dual-rate, the build constant otherwise.
+        if self.dual_rate:
+            _rate96 = ~self.rate_48k_i
+        else:
+            _rate96 = 0 if self.sample_rate == 48000 else 1
         KI_SHIFT  = 6
         INTEG_MAX = 0x2000 << KI_SHIFT       # ±2.08% of nominal feedback authority
         integ     = Signal(signed(24))
